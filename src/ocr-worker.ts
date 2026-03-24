@@ -2,7 +2,6 @@ import { parentPort } from 'node:worker_threads';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import Jimp from 'jimp';
 
 const OCR_UPSCALE_THRESHOLD = 1600;
@@ -52,7 +51,11 @@ function firstExistingPath(candidates: string[]): string {
 const TESS_CORE_PATH = firstExistingPath([
   (process.env.OVERLAY_FUZZ_TESS_CORE_PATH || '').trim(),
   path.join(CV_OCR_DIR, 'tesseract-core-simd.js'),
+  path.join(CV_OCR_DIR, 'tesseract-core-simd-lstm.js'),
+  path.join(CV_OCR_DIR, 'tesseract-core.js'),
   path.join(PROJECT_ROOT, 'node_modules', 'tesseract.js-core', 'tesseract-core-simd.js'),
+  path.join(PROJECT_ROOT, 'node_modules', 'tesseract.js-core', 'tesseract-core-simd-lstm.js'),
+  path.join(PROJECT_ROOT, 'node_modules', 'tesseract.js-core', 'tesseract-core.js'),
 ]);
 
 const TRAINEDDATA_PATH = firstExistingPath([
@@ -111,7 +114,7 @@ async function ensureTessApi(): Promise<void> {
     initPromise = (async () => {
       if (!TESS_CORE_PATH) {
         throw new Error(
-          'Missing tesseract-core-simd.js. Put OCR files under ./cv-ocr or set OVERLAY_FUZZ_TESS_CORE_PATH.',
+          'Missing tesseract core JS module. Put OCR files under ./cv-ocr or set OVERLAY_FUZZ_TESS_CORE_PATH.',
         );
       }
 
@@ -121,8 +124,18 @@ async function ensureTessApi(): Promise<void> {
         );
       }
 
-      const coreUrl = pathToFileURL(TESS_CORE_PATH).href;
-      const moduleFactory = (await import(coreUrl)).default as () => Promise<any>;
+      const loadedCore = require(TESS_CORE_PATH) as unknown;
+      const moduleFactory =
+        typeof loadedCore === 'function'
+          ? loadedCore
+          : typeof (loadedCore as { default?: unknown })?.default === 'function'
+            ? (loadedCore as { default: () => Promise<any> }).default
+            : null;
+
+      if (!moduleFactory) {
+        throw new Error(`Unsupported tesseract core module format at ${TESS_CORE_PATH}`);
+      }
+
       tessModule = await moduleFactory();
       tessApi = new tessModule.TessBaseAPI();
 
