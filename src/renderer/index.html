@@ -8,6 +8,15 @@
   </head>
   <body data-state="idle">
     <div class="scene">
+      <section class="selection-layer hidden" id="selectionLayer">
+        <div class="selection-guide">
+          <div>Drag to draw an OCR rectangle, then release to capture.</div>
+          <div class="selection-guide__hint">Press Esc or right-click to cancel</div>
+        </div>
+        <div class="selection-rect hidden" id="selectionRect">
+          <div class="selection-rect__label" id="selectionRectLabel">0 x 0</div>
+        </div>
+      </section>
       <div class="ambient ambient-a"></div>
       <div class="ambient ambient-b"></div>
       <div class="ambient ambient-c"></div>
@@ -39,7 +48,10 @@
           </div>
           <div class="footer">
             <div id="meta">Bridge ready</div>
-            <div class="hotkey">Ctrl/Cmd + Shift + O</div>
+            <div class="hotkey-group">
+              <div class="hotkey" id="quickHotkey">Quick: Ctrl/Cmd + Shift + O</div>
+              <div class="hotkey" id="regionHotkey">Region: Ctrl/Cmd + Shift + R</div>
+            </div>
           </div>
         </section>
       </div>

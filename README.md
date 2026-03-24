@@ -4,8 +4,9 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 
 ## What it does
 - Press `Ctrl/Cmd + Shift + O` to show a transparent overlay and OCR around your cursor.
+- Press `Ctrl/Cmd + Shift + R` to open a translucent selection layer, draw a rectangle, and OCR that exact region.
 - Overlay UI shows OCR text, confidence, status, and error state.
-- Press the same hotkey again to hide the overlay.
+- Press the currently active hotkey again to hide/cancel the overlay mode.
 
 ## Stack
 - Electron main process (`src/main.js`) orchestrates capture, OCR, and global input hooks.
