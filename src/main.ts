@@ -1,9 +1,17 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
-const { Worker } = require('worker_threads');
-const fs = require('fs');
-const path = require('path');
-const screenshot = require('screenshot-desktop');
-const Jimp = require('jimp');
+import {
+  app,
+  BrowserWindow,
+  globalShortcut,
+  ipcMain,
+  screen,
+  type BrowserWindowConstructorOptions,
+  type Display,
+} from 'electron';
+import { Worker } from 'node:worker_threads';
+import fs from 'node:fs';
+import path from 'node:path';
+import screenshot from 'screenshot-desktop';
+import Jimp from 'jimp';
 
 const HOTKEY_QUICK_CAPTURE = 'CommandOrControl+Shift+O';
 const HOTKEY_REGION_CAPTURE = 'CommandOrControl+Shift+R';
@@ -12,37 +20,83 @@ const CAPTURE_SIZE = { width: 700, height: 260 };
 const OVERLAY_TARGET_TITLE = (process.env.OVERLAY_FUZZ_TARGET_WINDOW_TITLE || '').trim();
 const ENABLE_OVERLAY_ATTACH = (process.env.OVERLAY_FUZZ_ATTACH_TO_TARGET || '').trim() === '1';
 const VITE_DEV_SERVER_URL = (process.env.VITE_DEV_SERVER_URL || '').trim();
-const RENDERER_DIST_INDEX = path.join(__dirname, '..', 'renderer', 'dist', 'index.html');
-const LEGACY_RENDERER_INDEX = path.join(__dirname, 'renderer', 'index.html');
+const PROJECT_ROOT = path.join(__dirname, '..');
+const RENDERER_DIST_INDEX = path.join(PROJECT_ROOT, 'renderer', 'dist', 'index.html');
+const LEGACY_RENDERER_INDEX = path.join(PROJECT_ROOT, 'build', 'renderer', 'index.html');
 const OVERLAY_MODES = {
   CONSOLE: 'console',
-};
+} as const;
 const CONSOLE_MIN_SIZE = { width: 520, height: 360 };
 const CONSOLE_DEFAULT_SIZE = { width: 760, height: 540 };
 const CONSOLE_WINDOW_MARGIN = 28;
 const OCR_WORKER_ENTRY = path.join(__dirname, 'ocr-worker.js');
 
-let overlayWindow = null;
+type OverlayMode = (typeof OVERLAY_MODES)[keyof typeof OVERLAY_MODES];
+
+interface OcrResultPayload {
+  text: string;
+  confidence: number | null;
+}
+
+interface OcrPendingRequest {
+  resolve: (payload: OcrResultPayload) => void;
+  reject: (error: Error) => void;
+}
+
+interface OverlayWindowController {
+  attachByTitle: (targetWindow: BrowserWindow, title: string, options?: { hasTitleBarOnMac?: boolean }) => void;
+}
+
+interface OverlayWindowBackend {
+  defaults: Partial<BrowserWindowConstructorOptions>;
+  controller: OverlayWindowController | null;
+}
+
+interface UiohookEvent {
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  keycode?: number;
+}
+
+interface UiohookBackend {
+  hook: {
+    on: (event: 'keydown', listener: (event: UiohookEvent) => void) => void;
+    off?: (event: 'keydown', listener: (event: UiohookEvent) => void) => void;
+    removeListener?: (event: 'keydown', listener: (event: UiohookEvent) => void) => void;
+    start: () => void;
+    stop?: () => void;
+  };
+  keycodes: Record<string, number | undefined>;
+}
+
+type OcrWorkerMessage =
+  | { type: 'ready' }
+  | { type: 'progress'; requestId: number; status?: string }
+  | { type: 'result'; requestId: number; text?: string; confidence?: number | null }
+  | { type: 'error'; requestId: number; error?: string };
+
+let overlayWindow: BrowserWindow | null = null;
 let isCapturing = false;
-let ocrWorkerThread = null;
+let ocrWorkerThread: Worker | null = null;
 let ocrWorkerRequestSeq = 0;
-const ocrWorkerPending = new Map();
-let hotkeyManager = null;
-let displaySyncCleanup = null;
+const ocrWorkerPending = new Map<number, OcrPendingRequest>();
+let hotkeyManager: { start: () => void; dispose: () => void } | null = null;
+let displaySyncCleanup: (() => void) | null = null;
 let overlayBridgeInitialized = false;
 let isAppQuitting = false;
-let overlayMode = OVERLAY_MODES.CONSOLE;
-let consoleWindowBounds = null;
+let overlayMode: OverlayMode = OVERLAY_MODES.CONSOLE;
+let consoleWindowBounds: Electron.Rectangle | null = null;
 
-function safeRequire(moduleName) {
+function safeRequire(moduleName: string): { module: any; error: Error | null } {
   try {
     return { module: require(moduleName), error: null };
   } catch (error) {
-    return { module: null, error };
+    return { module: null, error: error instanceof Error ? error : new Error(String(error)) };
   }
 }
 
-function resolveUiohookBackend() {
+function resolveUiohookBackend(): UiohookBackend | null {
   const loaded = safeRequire('uiohook-napi');
 
   if (!loaded.module) {
@@ -64,7 +118,7 @@ function resolveUiohookBackend() {
   return { hook, keycodes };
 }
 
-function resolveOverlayWindowBackend() {
+function resolveOverlayWindowBackend(): OverlayWindowBackend | null {
   const loaded = safeRequire('electron-overlay-window');
 
   if (!loaded.module) {
@@ -87,12 +141,16 @@ function resolveOverlayWindowBackend() {
     }
   }
 
+  if (!controller || typeof controller.attachByTitle !== 'function') {
+    return { defaults, controller: null };
+  }
+
   return { defaults, controller };
 }
 
 const overlayWindowBackend = resolveOverlayWindowBackend();
 
-function getOverlayWindowOptions() {
+function getOverlayWindowOptions(): BrowserWindowConstructorOptions {
   return {
     ...(overlayWindowBackend?.defaults || {}),
     width: CONSOLE_DEFAULT_SIZE.width,
@@ -117,35 +175,23 @@ function getOverlayWindowOptions() {
   };
 }
 
-function getCursorDisplay() {
+function getCursorDisplay(): Display {
   const cursor = screen.getCursorScreenPoint();
   return screen.getDisplayNearestPoint(cursor);
 }
 
-function getDisplayById(id) {
-  if (id === null || id === undefined) return null;
-  return screen.getAllDisplays().find((display) => display.id === id) || null;
-}
-
-function positionOverlayToDisplay(display) {
-  if (!overlayWindow || !display) return;
-  overlayWindow.setBounds(display.bounds);
-}
-
-function positionOverlayToCursorDisplay() {
-  if (!overlayWindow) return;
-  positionOverlayToDisplay(getCursorDisplay());
-}
-
-function clamp(value, min, max) {
+function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-function getDisplayWorkArea(display) {
+function getDisplayWorkArea(display: Display | null): Electron.Rectangle | null {
   return display?.workArea || display?.bounds || null;
 }
 
-function getConsoleBoundsForDisplay(display, sourceBounds = null) {
+function getConsoleBoundsForDisplay(
+  display: Display | null,
+  sourceBounds: Electron.Rectangle | null = null,
+): Electron.Rectangle {
   const workArea = getDisplayWorkArea(display);
   if (!workArea) {
     return sourceBounds || consoleWindowBounds || { ...CONSOLE_DEFAULT_SIZE, x: 0, y: 0 };
@@ -170,7 +216,7 @@ function getConsoleBoundsForDisplay(display, sourceBounds = null) {
   return { x, y, width, height };
 }
 
-function applyConsoleWindowBounds(display = getCursorDisplay(), sourceBounds = null) {
+function applyConsoleWindowBounds(display: Display = getCursorDisplay(), sourceBounds: Electron.Rectangle | null = null): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     return;
   }
@@ -180,7 +226,7 @@ function applyConsoleWindowBounds(display = getCursorDisplay(), sourceBounds = n
   overlayWindow.setBounds(nextBounds, false);
 }
 
-function rememberConsoleWindowBounds() {
+function rememberConsoleWindowBounds(): void {
   if (
     !overlayWindow ||
     overlayWindow.isDestroyed() ||
@@ -200,7 +246,7 @@ function rememberConsoleWindowBounds() {
   consoleWindowBounds = getConsoleBoundsForDisplay(display, currentBounds);
 }
 
-function emitOverlayMode() {
+function emitOverlayMode(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   try {
@@ -216,12 +262,12 @@ function emitOverlayMode() {
   }
 }
 
-function setOverlayMode(nextMode) {
+function setOverlayMode(_nextMode: OverlayMode): void {
   overlayMode = OVERLAY_MODES.CONSOLE;
   emitOverlayMode();
 }
 
-function setOverlayInteractivity(interactive) {
+function setOverlayInteractivity(interactive: boolean): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   if (interactive) {
@@ -245,7 +291,7 @@ function setOverlayInteractivity(interactive) {
   }
 }
 
-function settleOcrRequest(requestId, error, payload) {
+function settleOcrRequest(requestId: number, error: Error | null, payload?: OcrResultPayload): void {
   const pending = ocrWorkerPending.get(requestId);
   if (!pending) return;
   ocrWorkerPending.delete(requestId);
@@ -255,10 +301,10 @@ function settleOcrRequest(requestId, error, payload) {
     return;
   }
 
-  pending.resolve(payload);
+  pending.resolve(payload || { text: '', confidence: null });
 }
 
-function handleOcrWorkerMessage(message) {
+function handleOcrWorkerMessage(message: OcrWorkerMessage): void {
   if (!message || typeof message !== 'object') {
     return;
   }
@@ -271,7 +317,7 @@ function handleOcrWorkerMessage(message) {
   if (message.type === 'result') {
     settleOcrRequest(message.requestId, null, {
       text: typeof message.text === 'string' ? message.text : '',
-      confidence: Number.isFinite(message.confidence) ? message.confidence : null,
+      confidence: Number.isFinite(message.confidence) ? Number(message.confidence) : null,
     });
     return;
   }
@@ -281,7 +327,7 @@ function handleOcrWorkerMessage(message) {
   }
 }
 
-function handleOcrWorkerExit(code) {
+function handleOcrWorkerExit(code: number): void {
   const reason = new Error(`OCR worker exited unexpectedly (code ${code}).`);
   for (const requestId of ocrWorkerPending.keys()) {
     settleOcrRequest(requestId, reason);
@@ -289,7 +335,7 @@ function handleOcrWorkerExit(code) {
   ocrWorkerThread = null;
 }
 
-function ensureOcrWorkerThread() {
+function ensureOcrWorkerThread(): Promise<Worker> {
   if (ocrWorkerThread) {
     return Promise.resolve(ocrWorkerThread);
   }
@@ -299,7 +345,7 @@ function ensureOcrWorkerThread() {
       const thread = new Worker(OCR_WORKER_ENTRY);
       let ready = false;
 
-      thread.on('message', (message) => {
+      thread.on('message', (message: OcrWorkerMessage) => {
         if (!ready && message?.type === 'ready') {
           ready = true;
           resolve(thread);
@@ -311,7 +357,7 @@ function ensureOcrWorkerThread() {
 
       thread.once('error', (error) => {
         if (!ready) {
-          reject(error);
+          reject(error instanceof Error ? error : new Error(String(error)));
           return;
         }
 
@@ -327,18 +373,18 @@ function ensureOcrWorkerThread() {
 
       ocrWorkerThread = thread;
     } catch (error) {
-      reject(error);
+      reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }
 
-async function runWorkerOcr(imageBuffer) {
+async function runWorkerOcr(imageBuffer: Buffer): Promise<OcrResultPayload> {
   const thread = await ensureOcrWorkerThread();
   const requestId = ++ocrWorkerRequestSeq;
   const bytes = Uint8Array.from(imageBuffer);
 
   return new Promise((resolve, reject) => {
-    ocrWorkerPending.set(requestId, { resolve, reject });
+    ocrWorkerPending.set(requestId, { resolve, reject: (error) => reject(error) });
     try {
       thread.postMessage(
         {
@@ -349,12 +395,12 @@ async function runWorkerOcr(imageBuffer) {
         [bytes.buffer],
       );
     } catch (error) {
-      settleOcrRequest(requestId, error);
+      settleOcrRequest(requestId, error instanceof Error ? error : new Error(String(error)));
     }
   });
 }
 
-async function disposeOcrWorkerThread() {
+async function disposeOcrWorkerThread(): Promise<void> {
   if (!ocrWorkerThread) {
     return;
   }
@@ -373,7 +419,7 @@ async function disposeOcrWorkerThread() {
   }
 }
 
-async function captureAroundCursor() {
+async function captureAroundCursor(): Promise<Buffer> {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
 
@@ -383,11 +429,11 @@ async function captureAroundCursor() {
   const cursorX = cursor.x - display.bounds.x;
   const cursorY = cursor.y - display.bounds.y;
 
-  let buffer = null;
+  let buffer: Buffer;
   try {
-    buffer = await screenshot({ format: 'png', screen: display.id });
+    buffer = (await screenshot({ format: 'png', screen: display.id })) as Buffer;
   } catch {
-    buffer = await screenshot({ format: 'png' });
+    buffer = (await screenshot({ format: 'png' })) as Buffer;
   }
 
   const image = await Jimp.read(buffer);
@@ -406,7 +452,7 @@ async function captureAroundCursor() {
   return cropped.getBufferAsync(Jimp.MIME_PNG);
 }
 
-async function runOcrCapture(captureFn, captureMessage) {
+async function runOcrCapture(captureFn: () => Promise<Buffer>, captureMessage: string): Promise<boolean> {
   if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
     return false;
   }
@@ -426,10 +472,11 @@ async function runOcrCapture(captureFn, captureMessage) {
     overlayWindow.webContents.send('ocr-status', 'Done');
     return true;
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     overlayWindow.webContents.send('ocr-result', {
       text: '',
       confidence: null,
-      error: error.message || String(error),
+      error: errorMessage,
     });
     overlayWindow.webContents.send('ocr-status', 'Error during OCR');
     return false;
@@ -438,7 +485,7 @@ async function runOcrCapture(captureFn, captureMessage) {
   }
 }
 
-function clearSelectionContext() {
+function clearSelectionContext(): void {
   setOverlayMode(OVERLAY_MODES.CONSOLE);
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
@@ -447,14 +494,14 @@ function clearSelectionContext() {
   }
 }
 
-function hideOverlay() {
+function hideOverlay(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   clearSelectionContext();
   setOverlayInteractivity(false);
   overlayWindow.hide();
 }
 
-function showOverlayForCapture() {
+function showOverlayForCapture(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   if (!overlayBridgeInitialized) {
@@ -468,7 +515,7 @@ function showOverlayForCapture() {
   overlayWindow.show();
 }
 
-function toggleOverlayAndCapture() {
+function toggleOverlayAndCapture(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   if (overlayWindow.isVisible()) {
@@ -480,7 +527,7 @@ function toggleOverlayAndCapture() {
   void runOcrCapture(captureAroundCursor, 'Capturing screen...');
 }
 
-function startRegionSelection() {
+function startRegionSelection(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   if (overlayWindow.isVisible()) {
@@ -492,7 +539,7 @@ function startRegionSelection() {
   void runOcrCapture(captureAroundCursor, 'Capturing screen...');
 }
 
-function registerOverlayIpc() {
+function registerOverlayIpc(): void {
   ipcMain.on('overlay:hide-console', () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return;
@@ -502,16 +549,22 @@ function registerOverlayIpc() {
   });
 }
 
-function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
+function createHotkeyManager({
+  onQuickCapture,
+  onRegionSelection,
+}: {
+  onQuickCapture: () => void;
+  onRegionSelection: () => void;
+}) {
   const uiohookBackend = resolveUiohookBackend();
-  let activeBackend = null;
+  let activeBackend: 'uiohook' | 'globalShortcut' | null = null;
   const lastTriggeredAt = {
     quick: 0,
     region: 0,
   };
-  let keydownListener = null;
+  let keydownListener: ((event: UiohookEvent) => void) | null = null;
 
-  function unregisterGlobalShortcut() {
+  function unregisterGlobalShortcut(): void {
     try {
       globalShortcut.unregister(HOTKEY_QUICK_CAPTURE);
       globalShortcut.unregister(HOTKEY_REGION_CAPTURE);
@@ -520,7 +573,7 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
     }
   }
 
-  function unregisterUiohook() {
+  function unregisterUiohook(): void {
     if (!uiohookBackend) return;
 
     const { hook } = uiohookBackend;
@@ -541,7 +594,7 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
     }
   }
 
-  function resolveHotkeyAction(event) {
+  function resolveHotkeyAction(event: UiohookEvent | null | undefined): 'quick' | 'region' | null {
     if (!event) return null;
 
     const needsMeta = process.platform === 'darwin';
@@ -564,7 +617,7 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
     return null;
   }
 
-  function triggerAction(action) {
+  function triggerAction(action: 'quick' | 'region'): void {
     const now = Date.now();
     if (now - lastTriggeredAt[action] < HOTKEY_DEBOUNCE_MS) {
       return;
@@ -583,7 +636,7 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
   }
 
   return {
-    start() {
+    start(): void {
       if (uiohookBackend) {
         try {
           keydownListener = (event) => {
@@ -597,7 +650,8 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
           activeBackend = 'uiohook';
           return;
         } catch (error) {
-          console.warn('[overlayFuzz] uiohook-napi failed, falling back to globalShortcut:', error.message || error);
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn('[overlayFuzz] uiohook-napi failed, falling back to globalShortcut:', message);
           unregisterUiohook();
           activeBackend = null;
         }
@@ -617,11 +671,12 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
           );
         }
       } catch (error) {
-        console.warn('[overlayFuzz] globalShortcut failed for hotkeys:', error.message || error);
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn('[overlayFuzz] globalShortcut failed for hotkeys:', message);
       }
     },
 
-    dispose() {
+    dispose(): void {
       if (activeBackend === 'uiohook') {
         unregisterUiohook();
       } else if (activeBackend === 'globalShortcut') {
@@ -637,7 +692,7 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
   };
 }
 
-function configureOptionalOverlayBridge() {
+function configureOptionalOverlayBridge(): boolean {
   if (
     !ENABLE_OVERLAY_ATTACH ||
     !overlayWindow ||
@@ -655,16 +710,18 @@ function configureOptionalOverlayBridge() {
     overlayBridgeInitialized = true;
     return true;
   } catch (error) {
-    console.warn('[overlayFuzz] electron-overlay-window attachByTitle failed:', error.message || error);
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[overlayFuzz] electron-overlay-window attachByTitle failed:', message);
     return false;
   }
 }
 
-function createOverlayWindow() {
+function createOverlayWindow(): void {
   overlayWindow = new BrowserWindow(getOverlayWindowOptions());
 
-  loadOverlayRenderer(overlayWindow).catch((error) => {
-    console.error('[overlayFuzz] Renderer load failed:', error.message || error);
+  loadOverlayRenderer(overlayWindow).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[overlayFuzz] Renderer load failed:', message);
   });
 
   setOverlayInteractivity(false);
@@ -700,7 +757,7 @@ function createOverlayWindow() {
   configureOptionalOverlayBridge();
 }
 
-async function loadOverlayRenderer(targetWindow) {
+async function loadOverlayRenderer(targetWindow: BrowserWindow): Promise<void> {
   const rendererTarget = resolveRendererTarget();
 
   if (rendererTarget.type === 'url') {
@@ -708,7 +765,8 @@ async function loadOverlayRenderer(targetWindow) {
       await targetWindow.loadURL(rendererTarget.value);
       return;
     } catch (error) {
-      console.warn('[overlayFuzz] Failed to load Vite renderer URL, falling back to file:', error.message || error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[overlayFuzz] Failed to load Vite renderer URL, falling back to file:', message);
       const fallbackFile = resolveFileRendererIndex();
       await targetWindow.loadFile(fallbackFile);
       return;
@@ -718,7 +776,7 @@ async function loadOverlayRenderer(targetWindow) {
   await targetWindow.loadFile(rendererTarget.value);
 }
 
-function resolveRendererTarget() {
+function resolveRendererTarget(): { type: 'url' | 'file'; value: string } {
   if (VITE_DEV_SERVER_URL) {
     return {
       type: 'url',
@@ -733,7 +791,7 @@ function resolveRendererTarget() {
   return { type: 'file', value: LEGACY_RENDERER_INDEX };
 }
 
-function resolveFileRendererIndex() {
+function resolveFileRendererIndex(): string {
   if (fs.existsSync(RENDERER_DIST_INDEX)) {
     return RENDERER_DIST_INDEX;
   }
@@ -741,7 +799,7 @@ function resolveFileRendererIndex() {
   return LEGACY_RENDERER_INDEX;
 }
 
-function installDisplaySync() {
+function installDisplaySync(): () => void {
   const syncOverlay = () => {
     if (overlayBridgeInitialized || !overlayWindow || !overlayWindow.isVisible()) {
       return;
@@ -769,7 +827,8 @@ function installDisplaySync() {
 
 app.whenReady().then(() => {
   ensureOcrWorkerThread().catch((error) => {
-    console.warn('[overlayFuzz] OCR worker warm-up failed:', error.message || error);
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[overlayFuzz] OCR worker warm-up failed:', message);
   });
   registerOverlayIpc();
   createOverlayWindow();

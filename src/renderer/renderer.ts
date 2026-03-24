@@ -1,3 +1,39 @@
+interface OverlayResultPayload {
+  text: string;
+  confidence: number | null;
+  error?: string;
+}
+
+interface OverlayModePayload {
+  mode: 'console' | 'selecting';
+  hotkeys?: {
+    quick?: string;
+    region?: string;
+  };
+}
+
+interface OverlaySelectionRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface OverlayApi {
+  onStatus(callback: (status: string) => void): void;
+  onResult(callback: (payload: OverlayResultPayload) => void): void;
+  onMode(callback: (payload: OverlayModePayload) => void): void;
+  hideOverlay(): void;
+  cancelSelection?(): void;
+  submitRegion?(rect: OverlaySelectionRect): Promise<{ ok: boolean; error?: string }>;
+}
+
+declare global {
+  interface Window {
+    overlayApi?: OverlayApi;
+  }
+}
+
 const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
 const metaEl = document.getElementById('meta');
@@ -16,10 +52,10 @@ const MIN_SELECTION_SIZE = 6;
 const uiState = {
   status: 'Press Ctrl/Cmd + Shift + O for quick OCR or Ctrl/Cmd + Shift + R to select a region.',
   result: 'Waiting for OCR...',
-  confidence: null,
+  confidence: null as number | null,
   error: '',
-  state: 'idle',
-  mode: 'console',
+  state: 'idle' as 'idle' | 'capturing' | 'processing' | 'done' | 'error',
+  mode: 'console' as 'console' | 'selecting',
   hotkeys: {
     quick: 'Ctrl/Cmd + Shift + O',
     region: 'Ctrl/Cmd + Shift + R',
@@ -29,16 +65,16 @@ const uiState = {
 const selectionState = {
   dragging: false,
   submitting: false,
-  start: null,
-  current: null,
+  start: null as { x: number; y: number } | null,
+  current: null as { x: number; y: number } | null,
 };
 
-function clampConfidence(value) {
+function clampConfidence(value: number | null | undefined): number {
   if (typeof value !== 'number' || Number.isNaN(value)) return 0;
   return Math.max(0, Math.min(100, value));
 }
 
-function prettifyHotkey(value) {
+function prettifyHotkey(value: string | undefined): string {
   if (typeof value !== 'string' || !value.trim()) {
     return '';
   }
@@ -50,7 +86,7 @@ function prettifyHotkey(value) {
     .trim();
 }
 
-function deriveState(status, payload) {
+function deriveState(status: string, payload?: OverlayResultPayload): 'idle' | 'capturing' | 'processing' | 'done' | 'error' {
   const text = `${status || ''} ${payload?.error || ''}`.toLowerCase();
   if (payload?.error || text.includes('error')) return 'error';
   if (text.includes('captur')) return 'capturing';
@@ -59,7 +95,7 @@ function deriveState(status, payload) {
   return 'idle';
 }
 
-function currentSelectionRect() {
+function currentSelectionRect(): OverlaySelectionRect | null {
   if (!selectionState.start || !selectionState.current) {
     return null;
   }
@@ -72,13 +108,13 @@ function currentSelectionRect() {
   return { x: left, y: top, width, height };
 }
 
-function clearSelectionRect() {
+function clearSelectionRect(): void {
   selectionState.dragging = false;
   selectionState.start = null;
   selectionState.current = null;
 }
 
-function updateSelectionRectUI() {
+function updateSelectionRectUI(): void {
   if (!selectionRectEl || !selectionRectLabelEl) return;
 
   const rect = currentSelectionRect();
@@ -88,45 +124,53 @@ function updateSelectionRectUI() {
   }
 
   selectionRectEl.classList.remove('hidden');
-  selectionRectEl.style.left = `${rect.x}px`;
-  selectionRectEl.style.top = `${rect.y}px`;
-  selectionRectEl.style.width = `${rect.width}px`;
-  selectionRectEl.style.height = `${rect.height}px`;
+  (selectionRectEl as HTMLElement).style.left = `${rect.x}px`;
+  (selectionRectEl as HTMLElement).style.top = `${rect.y}px`;
+  (selectionRectEl as HTMLElement).style.width = `${rect.width}px`;
+  (selectionRectEl as HTMLElement).style.height = `${rect.height}px`;
   selectionRectLabelEl.textContent = `${Math.round(rect.width)} x ${Math.round(rect.height)}`;
 }
 
-function syncUI() {
+function syncUI(): void {
   document.body.dataset.state = uiState.state;
   document.body.dataset.mode = uiState.mode;
-  statusEl.textContent = uiState.status;
-  resultEl.textContent = uiState.result;
-  metaEl.textContent =
-    uiState.mode === 'selecting'
-      ? 'Selection mode active'
-      : uiState.state === 'error'
-        ? 'Bridge reported an error'
-        : 'Bridge ready';
-  statePillEl.textContent =
-    uiState.state === 'capturing'
-      ? 'Capturing'
-      : uiState.state === 'processing'
-        ? 'Processing'
-        : uiState.state === 'done'
-          ? 'Ready'
-          : uiState.state === 'error'
-            ? 'Error'
-            : 'Idle';
-
-  if (uiState.confidence === null || uiState.confidence === undefined) {
-    confidenceValueEl.textContent = '--';
-    confidenceBarEl.style.width = '0%';
-  } else {
-    confidenceValueEl.textContent = `${uiState.confidence.toFixed(1)}%`;
-    confidenceBarEl.style.width = `${clampConfidence(uiState.confidence)}%`;
+  if (statusEl) statusEl.textContent = uiState.status;
+  if (resultEl) resultEl.textContent = uiState.result;
+  if (metaEl) {
+    metaEl.textContent =
+      uiState.mode === 'selecting'
+        ? 'Selection mode active'
+        : uiState.state === 'error'
+          ? 'Bridge reported an error'
+          : 'Bridge ready';
+  }
+  if (statePillEl) {
+    statePillEl.textContent =
+      uiState.state === 'capturing'
+        ? 'Capturing'
+        : uiState.state === 'processing'
+          ? 'Processing'
+          : uiState.state === 'done'
+            ? 'Ready'
+            : uiState.state === 'error'
+              ? 'Error'
+              : 'Idle';
   }
 
-  errorValueEl.textContent = uiState.error || 'No errors reported.';
-  errorValueEl.classList.toggle('metric__value--error', Boolean(uiState.error));
+  if (confidenceValueEl && confidenceBarEl) {
+    if (uiState.confidence === null || uiState.confidence === undefined) {
+      confidenceValueEl.textContent = '--';
+      (confidenceBarEl as HTMLElement).style.width = '0%';
+    } else {
+      confidenceValueEl.textContent = `${uiState.confidence.toFixed(1)}%`;
+      (confidenceBarEl as HTMLElement).style.width = `${clampConfidence(uiState.confidence)}%`;
+    }
+  }
+
+  if (errorValueEl) {
+    errorValueEl.textContent = uiState.error || 'No errors reported.';
+    errorValueEl.classList.toggle('metric__value--error', Boolean(uiState.error));
+  }
 
   if (quickHotkeyEl) {
     quickHotkeyEl.textContent = `Quick: ${uiState.hotkeys.quick}`;
@@ -142,13 +186,13 @@ function syncUI() {
   updateSelectionRectUI();
 }
 
-function updateStatus(text) {
+function updateStatus(text: string): void {
   uiState.status = text;
-  uiState.state = deriveState(text, { error: uiState.error });
+  uiState.state = deriveState(text, { error: uiState.error, text: uiState.result, confidence: uiState.confidence });
   syncUI();
 }
 
-function updateResult(payload) {
+function updateResult(payload: OverlayResultPayload): void {
   if (!payload) return;
   uiState.confidence = payload.confidence ?? null;
   if (payload.error) {
@@ -163,7 +207,7 @@ function updateResult(payload) {
   syncUI();
 }
 
-function applyMode(payload) {
+function applyMode(payload: OverlayModePayload): void {
   uiState.mode = payload?.mode === 'selecting' ? 'selecting' : 'console';
 
   const quick = prettifyHotkey(payload?.hotkeys?.quick);
@@ -189,7 +233,8 @@ function applyMode(payload) {
   syncUI();
 }
 
-function selectionPointFromEvent(event) {
+function selectionPointFromEvent(event: PointerEvent): { x: number; y: number } {
+  if (!selectionLayerEl) return { x: 0, y: 0 };
   const bounds = selectionLayerEl.getBoundingClientRect();
   return {
     x: event.clientX - bounds.left,
@@ -197,7 +242,7 @@ function selectionPointFromEvent(event) {
   };
 }
 
-function cancelSelection() {
+function cancelSelection(): void {
   clearSelectionRect();
   selectionState.submitting = false;
   syncUI();
@@ -207,7 +252,7 @@ function cancelSelection() {
   }
 }
 
-async function submitSelection(rect) {
+async function submitSelection(rect: OverlaySelectionRect): Promise<void> {
   if (!window.overlayApi?.submitRegion) {
     uiState.error = 'Bridge unavailable';
     uiState.state = 'error';
@@ -228,7 +273,7 @@ async function submitSelection(rect) {
       syncUI();
     }
   } catch (error) {
-    uiState.error = error?.message || String(error);
+    uiState.error = error instanceof Error ? error.message : String(error);
     uiState.state = 'error';
     syncUI();
   } finally {
@@ -236,12 +281,13 @@ async function submitSelection(rect) {
   }
 }
 
-function onSelectionPointerDown(event) {
+function onSelectionPointerDown(event: PointerEvent): void {
   if (
     uiState.mode !== 'selecting' ||
     selectionState.submitting ||
     event.button !== 0 ||
     !selectionLayerEl ||
+    !(event.target instanceof Node) ||
     !selectionLayerEl.contains(event.target)
   ) {
     return;
@@ -260,7 +306,7 @@ function onSelectionPointerDown(event) {
   syncUI();
 }
 
-function onSelectionPointerMove(event) {
+function onSelectionPointerMove(event: PointerEvent): void {
   if (!selectionState.dragging || uiState.mode !== 'selecting' || selectionState.submitting) {
     return;
   }
@@ -269,7 +315,7 @@ function onSelectionPointerMove(event) {
   updateSelectionRectUI();
 }
 
-async function onSelectionPointerUp(event) {
+async function onSelectionPointerUp(event: PointerEvent): Promise<void> {
   if (!selectionState.dragging || uiState.mode !== 'selecting' || selectionState.submitting) {
     return;
   }
@@ -292,7 +338,7 @@ async function onSelectionPointerUp(event) {
   await submitSelection(rect);
 }
 
-function onSelectionPointerCancel(event) {
+function onSelectionPointerCancel(event: PointerEvent): void {
   if (selectionLayerEl?.releasePointerCapture && selectionLayerEl.hasPointerCapture(event.pointerId)) {
     selectionLayerEl.releasePointerCapture(event.pointerId);
   }
@@ -301,7 +347,7 @@ function onSelectionPointerCancel(event) {
   syncUI();
 }
 
-function onWindowKeydown(event) {
+function onWindowKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape' || uiState.mode !== 'selecting') {
     return;
   }
@@ -336,3 +382,5 @@ if (window.overlayApi) {
   uiState.error = 'Bridge unavailable';
   syncUI();
 }
+
+export {};

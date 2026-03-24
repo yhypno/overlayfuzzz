@@ -3,14 +3,20 @@
   "version": "0.1.0",
   "description": "Lightweight desktop overlay with OCR hotkey capture (Exiled-Exchange-2-inspired tech stack).",
   "packageManager": "bun@1.1.0",
-  "main": "src/main.js",
+  "main": "build/main.js",
   "scripts": {
-    "start": "electron .",
-    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "start": "npm run build:electron && electron .",
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron:watch\" \"npm:dev:electron\"",
     "dev:renderer": "vite --config renderer/vite.config.ts",
-    "dev:electron": "wait-on tcp:127.0.0.1:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:electron": "npm run build:electron:assets && wait-on tcp:127.0.0.1:5173 build/main.js && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build": "npm run build:renderer && npm run build:electron",
+    "build:electron": "npm run build:electron:ts && npm run build:electron:assets",
+    "build:electron:ts": "tsc -p tsconfig.electron.json",
+    "build:electron:assets": "mkdir -p build/renderer && cp src/renderer/index.html src/renderer/styles.css build/renderer/",
     "build:renderer": "vite build --config renderer/vite.config.ts",
     "preview:renderer": "vite preview --config renderer/vite.config.ts",
+    "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
     "typecheck:renderer": "vue-tsc --project renderer/tsconfig.json --noEmit"
   },
   "keywords": [
@@ -35,6 +41,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
+    "@types/node": "^24.0.0",
     "autoprefixer": "^10.4.0",
     "concurrently": "^8.0.0",
     "postcss": "^8.4.0",

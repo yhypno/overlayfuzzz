@@ -8,6 +8,7 @@ yarn-error.log*
 # Build output
 out/
 dist/
+build/
 release/
 *.tsbuildinfo
 

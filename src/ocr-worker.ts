@@ -1,8 +1,9 @@
-const { parentPort } = require('worker_threads');
-const fs = require('fs/promises');
-const path = require('path');
-const { pathToFileURL } = require('url');
-const Jimp = require('jimp');
+import { parentPort } from 'node:worker_threads';
+import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import Jimp from 'jimp';
 
 const OCR_UPSCALE_THRESHOLD = 1600;
 const OCR_PASSES = [
@@ -30,16 +31,16 @@ const OCR_PASSES = [
     pageSegMode: '11',
     binary: true,
   },
-];
+] as const;
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const CV_OCR_DIR = path.join(PROJECT_ROOT, 'cv-ocr');
 
-function firstExistingPath(candidates) {
+function firstExistingPath(candidates: string[]): string {
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {
-      require('fs').accessSync(candidate);
+      fsSync.accessSync(candidate);
       return candidate;
     } catch {
       // Try next candidate.
@@ -60,11 +61,11 @@ const TRAINEDDATA_PATH = firstExistingPath([
   path.join(PROJECT_ROOT, 'eng.traineddata'),
 ]);
 
-let tessModule = null;
-let tessApi = null;
-let initPromise = null;
+let tessModule: any = null;
+let tessApi: any = null;
+let initPromise: Promise<void> | null = null;
 
-function postMessageSafe(payload) {
+function postMessageSafe(payload: Record<string, unknown>): void {
   if (!parentPort) return;
   try {
     parentPort.postMessage(payload);
@@ -73,7 +74,7 @@ function postMessageSafe(payload) {
   }
 }
 
-function normalizeRecognizedText(text) {
+function normalizeRecognizedText(text: unknown): string {
   if (!text) return '';
   return String(text)
     .replace(/\r\n/g, '\n')
@@ -82,13 +83,16 @@ function normalizeRecognizedText(text) {
     .trim();
 }
 
-function scoreCandidate(candidate) {
+function scoreCandidate(candidate: { text: string; confidence: number | null }): number {
   const lengthBoost = Math.min(candidate.text.length, 220) * 0.14;
   const emptyPenalty = candidate.text.length > 0 ? 0 : 42;
   return (candidate.confidence || 0) + lengthBoost - emptyPenalty;
 }
 
-function selectBestCandidate(candidates) {
+function selectBestCandidate(candidates: Array<{ text: string; confidence: number | null }>): {
+  text: string;
+  confidence: number | null;
+} {
   if (!Array.isArray(candidates) || candidates.length === 0) {
     return { text: '', confidence: null };
   }
@@ -98,7 +102,7 @@ function selectBestCandidate(candidates) {
   });
 }
 
-async function ensureTessApi() {
+async function ensureTessApi(): Promise<void> {
   if (tessApi) {
     return;
   }
@@ -118,7 +122,7 @@ async function ensureTessApi() {
       }
 
       const coreUrl = pathToFileURL(TESS_CORE_PATH).href;
-      const moduleFactory = (await import(coreUrl)).default;
+      const moduleFactory = (await import(coreUrl)).default as () => Promise<any>;
       tessModule = await moduleFactory();
       tessApi = new tessModule.TessBaseAPI();
 
@@ -140,18 +144,20 @@ async function ensureTessApi() {
   await initPromise;
 }
 
-function ocrSetImage(bytes, width, height, bytesPerPixel) {
+function ocrSetImage(bytes: Uint8Array, width: number, height: number, bytesPerPixel: number): void {
   const ptr = tessModule._malloc(bytes.byteLength);
   tessModule.HEAPU8.set(bytes, ptr);
   tessApi.SetImage(ptr, width, height, bytesPerPixel, width * bytesPerPixel);
   tessModule._free(ptr);
 }
 
-async function buildOcrBuffers(imageBytes) {
+async function buildOcrBuffers(
+  imageBytes: Uint8Array,
+): Promise<Array<{ label: string; pageSegMode: string; bitmap: Jimp['bitmap'] }>> {
   const source = await Jimp.read(Buffer.from(imageBytes));
   const shouldUpscale = Math.max(source.bitmap.width, source.bitmap.height) < OCR_UPSCALE_THRESHOLD;
   const scale = shouldUpscale ? 2 : 1;
-  const buffers = [];
+  const buffers: Array<{ label: string; pageSegMode: string; bitmap: Jimp['bitmap'] }> = [];
 
   for (const pass of OCR_PASSES) {
     const img = source.clone().greyscale().normalize().contrast(pass.contrast);
@@ -186,14 +192,14 @@ async function buildOcrBuffers(imageBytes) {
   return buffers;
 }
 
-function toRgbaBytes(bitmap) {
+function toRgbaBytes(bitmap: Jimp['bitmap']): Uint8Array {
   return Uint8Array.from(bitmap.data);
 }
 
-async function recognizeImage(requestId, imageBytes) {
+async function recognizeImage(requestId: number, imageBytes: Uint8Array): Promise<{ text: string; confidence: number | null }> {
   await ensureTessApi();
   const inputs = await buildOcrBuffers(imageBytes);
-  const candidates = [];
+  const candidates: Array<{ text: string; confidence: number | null }> = [];
 
   for (let index = 0; index < inputs.length; index += 1) {
     const pass = inputs[index];
@@ -214,14 +220,14 @@ async function recognizeImage(requestId, imageBytes) {
 
     candidates.push({
       text: normalizeRecognizedText(tessApi.GetUTF8Text()),
-      confidence: Number.isFinite(tessApi.MeanTextConf()) ? tessApi.MeanTextConf() : null,
+      confidence: Number.isFinite(tessApi.MeanTextConf()) ? Number(tessApi.MeanTextConf()) : null,
     });
   }
 
   return selectBestCandidate(candidates);
 }
 
-async function shutdown() {
+async function shutdown(): Promise<void> {
   if (!tessApi) return;
 
   try {
@@ -236,7 +242,7 @@ async function shutdown() {
 }
 
 if (parentPort) {
-  parentPort.on('message', async (message) => {
+  parentPort.on('message', async (message: any) => {
     if (!message || typeof message !== 'object') {
       return;
     }
@@ -254,7 +260,7 @@ if (parentPort) {
         postMessageSafe({
           type: 'error',
           requestId: message.requestId,
-          error: error?.message || String(error),
+          error: error instanceof Error ? error.message : String(error),
         });
       }
       return;

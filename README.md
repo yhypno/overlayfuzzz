@@ -9,7 +9,7 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 - Press the currently active hotkey again to hide/cancel the overlay mode.
 
 ## Stack
-- Electron main process (`src/main.js`) orchestrates capture, OCR, and global input hooks.
+- Electron main process (`src/main.ts`) orchestrates capture, OCR, and global input hooks.
 - Optional hook backends:
   - `uiohook-napi` for low-level global input events.
   - Electron `globalShortcut` fallback when `uiohook-napi` is unavailable.
@@ -21,13 +21,15 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 ## Setup
 1. Install dependencies:
    - `bun install`
-2. Run full dev mode (Vite + Electron):
+2. Run full dev mode (Vite + Electron + TypeScript watch for main/preload/worker):
    - `bun run dev`
 3. Build renderer bundle:
    - `bun run build:renderer`
-4. Run Electron directly:
+4. Build everything:
+   - `bun run build`
+5. Run Electron directly:
    - `bun run start`
-5. Optional npm fallback:
+6. Optional npm fallback:
    - `npm install && npm run dev`
 
 ## Notes
@@ -36,7 +38,7 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 - Overlay attachment by target window is opt-in. To enable it, set both:
   - `OVERLAY_FUZZ_ATTACH_TO_TARGET=1`
   - `OVERLAY_FUZZ_TARGET_WINDOW_TITLE="<target window title>"`
-- Adjust OCR capture size in `src/main.js` via `CAPTURE_SIZE`.
+- Adjust OCR capture size in `src/main.ts` via `CAPTURE_SIZE`.
 - OCR worker uses `tesseract-core-simd` directly (`TessBaseAPI`) and looks for OCR files in:
   - `./cv-ocr/` (preferred, Exiled/Awakened style)
   - fallback: `./eng.traineddata` and bundled `node_modules/tesseract.js-core/tesseract-core-simd.js`
