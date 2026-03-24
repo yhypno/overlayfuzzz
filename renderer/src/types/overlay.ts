@@ -28,6 +28,5 @@ export interface OverlayApi {
   onStatus(callback: (status: string) => void): void;
   onResult(callback: (payload: OverlayResult) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
-  submitRegion(region: OverlayRegion): Promise<OverlayRegionResponse>;
-  cancelSelection(): void;
+  hideOverlay(): void;
 }

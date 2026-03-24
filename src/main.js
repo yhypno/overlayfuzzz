@@ -1,42 +1,37 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
+const { Worker } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 const screenshot = require('screenshot-desktop');
 const Jimp = require('jimp');
-const Tesseract = require('tesseract.js');
 
 const HOTKEY_QUICK_CAPTURE = 'CommandOrControl+Shift+O';
 const HOTKEY_REGION_CAPTURE = 'CommandOrControl+Shift+R';
 const HOTKEY_DEBOUNCE_MS = 250;
 const CAPTURE_SIZE = { width: 700, height: 260 };
 const OVERLAY_TARGET_TITLE = (process.env.OVERLAY_FUZZ_TARGET_WINDOW_TITLE || '').trim();
+const ENABLE_OVERLAY_ATTACH = (process.env.OVERLAY_FUZZ_ATTACH_TO_TARGET || '').trim() === '1';
 const VITE_DEV_SERVER_URL = (process.env.VITE_DEV_SERVER_URL || '').trim();
 const RENDERER_DIST_INDEX = path.join(__dirname, '..', 'renderer', 'dist', 'index.html');
 const LEGACY_RENDERER_INDEX = path.join(__dirname, 'renderer', 'index.html');
 const OVERLAY_MODES = {
   CONSOLE: 'console',
-  SELECTING: 'selecting',
 };
-const MIN_REGION_SIZE = 6;
 const CONSOLE_MIN_SIZE = { width: 520, height: 360 };
 const CONSOLE_DEFAULT_SIZE = { width: 760, height: 540 };
 const CONSOLE_WINDOW_MARGIN = 28;
-const OCR_UPSCALE_THRESHOLD = 1600;
-const OCR_THRESHOLD_MAX = 165;
-const OCR_PASSES = [
-  { label: 'balanced', contrast: 0.38, threshold: false },
-  { label: 'high-contrast', contrast: 0.64, threshold: true },
-];
+const OCR_WORKER_ENTRY = path.join(__dirname, 'ocr-worker.js');
 
 let overlayWindow = null;
 let isCapturing = false;
-let workerPromise = null;
+let ocrWorkerThread = null;
+let ocrWorkerRequestSeq = 0;
+const ocrWorkerPending = new Map();
 let hotkeyManager = null;
 let displaySyncCleanup = null;
 let overlayBridgeInitialized = false;
 let isAppQuitting = false;
 let overlayMode = OVERLAY_MODES.CONSOLE;
-let selectionDisplayId = null;
 let consoleWindowBounds = null;
 
 function safeRequire(moduleName) {
@@ -222,7 +217,7 @@ function emitOverlayMode() {
 }
 
 function setOverlayMode(nextMode) {
-  overlayMode = nextMode === OVERLAY_MODES.SELECTING ? OVERLAY_MODES.SELECTING : OVERLAY_MODES.CONSOLE;
+  overlayMode = OVERLAY_MODES.CONSOLE;
   emitOverlayMode();
 }
 
@@ -250,109 +245,132 @@ function setOverlayInteractivity(interactive) {
   }
 }
 
-async function getWorker() {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const worker = await Tesseract.createWorker('eng');
+function settleOcrRequest(requestId, error, payload) {
+  const pending = ocrWorkerPending.get(requestId);
+  if (!pending) return;
+  ocrWorkerPending.delete(requestId);
 
-      try {
-        await worker.setParameters({
-          tessedit_pageseg_mode: '6',
-          preserve_interword_spaces: '1',
-        });
-      } catch {
-        // Not all engines support every runtime parameter.
-      }
-
-      return worker;
-    })();
+  if (error) {
+    pending.reject(error);
+    return;
   }
 
-  return workerPromise;
+  pending.resolve(payload);
 }
 
-function normalizeRecognizedText(text) {
-  if (!text) return '';
-  return String(text)
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
+function handleOcrWorkerMessage(message) {
+  if (!message || typeof message !== 'object') {
+    return;
+  }
 
-async function buildOcrPassBuffers(imageBuffer) {
-  const source = await Jimp.read(imageBuffer);
-  const shouldUpscale = Math.max(source.bitmap.width, source.bitmap.height) < OCR_UPSCALE_THRESHOLD;
-  const scaleFactor = shouldUpscale ? 2 : 1;
-  const buffers = [];
+  if (message.type === 'progress' && overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('ocr-status', message.status || 'Running OCR...');
+    return;
+  }
 
-  for (const pass of OCR_PASSES) {
-    const image = source.clone().greyscale().normalize().contrast(pass.contrast);
-
-    if (shouldUpscale) {
-      image.resize(
-        Math.max(1, Math.round(source.bitmap.width * scaleFactor)),
-        Math.max(1, Math.round(source.bitmap.height * scaleFactor)),
-        Jimp.RESIZE_BICUBIC,
-      );
-    }
-
-    if (pass.threshold) {
-      image.threshold({ max: OCR_THRESHOLD_MAX });
-    }
-
-    buffers.push({
-      label: pass.label,
-      buffer: await image.getBufferAsync(Jimp.MIME_PNG),
+  if (message.type === 'result') {
+    settleOcrRequest(message.requestId, null, {
+      text: typeof message.text === 'string' ? message.text : '',
+      confidence: Number.isFinite(message.confidence) ? message.confidence : null,
     });
+    return;
   }
 
-  return buffers;
+  if (message.type === 'error') {
+    settleOcrRequest(message.requestId, new Error(message.error || 'OCR worker failed.'));
+  }
 }
 
-function scoreOcrCandidate(candidate) {
-  const textLengthBoost = Math.min(candidate.text.length, 180) * 0.12;
-  const emptyPenalty = candidate.text.length > 0 ? 0 : 40;
-  return (candidate.confidence || 0) + textLengthBoost - emptyPenalty;
+function handleOcrWorkerExit(code) {
+  const reason = new Error(`OCR worker exited unexpectedly (code ${code}).`);
+  for (const requestId of ocrWorkerPending.keys()) {
+    settleOcrRequest(requestId, reason);
+  }
+  ocrWorkerThread = null;
 }
 
-function selectBestOcrCandidate(candidates) {
-  if (!Array.isArray(candidates) || candidates.length === 0) {
-    return { text: '', confidence: null };
+function ensureOcrWorkerThread() {
+  if (ocrWorkerThread) {
+    return Promise.resolve(ocrWorkerThread);
   }
 
-  return candidates.reduce((best, current) => {
-    return scoreOcrCandidate(current) > scoreOcrCandidate(best) ? current : best;
+  return new Promise((resolve, reject) => {
+    try {
+      const thread = new Worker(OCR_WORKER_ENTRY);
+      let ready = false;
+
+      thread.on('message', (message) => {
+        if (!ready && message?.type === 'ready') {
+          ready = true;
+          resolve(thread);
+          return;
+        }
+
+        handleOcrWorkerMessage(message);
+      });
+
+      thread.once('error', (error) => {
+        if (!ready) {
+          reject(error);
+          return;
+        }
+
+        handleOcrWorkerExit(-1);
+      });
+
+      thread.once('exit', (code) => {
+        handleOcrWorkerExit(code);
+        if (!ready) {
+          reject(new Error(`OCR worker exited before initialization (code ${code}).`));
+        }
+      });
+
+      ocrWorkerThread = thread;
+    } catch (error) {
+      reject(error);
+    }
   });
 }
 
-function normalizeRegion(region, maxWidth, maxHeight) {
-  const x = Number(region?.x);
-  const y = Number(region?.y);
-  const width = Number(region?.width);
-  const height = Number(region?.height);
+async function runWorkerOcr(imageBuffer) {
+  const thread = await ensureOcrWorkerThread();
+  const requestId = ++ocrWorkerRequestSeq;
+  const bytes = Uint8Array.from(imageBuffer);
 
-  if (![x, y, width, height].every((value) => Number.isFinite(value))) {
-    return null;
+  return new Promise((resolve, reject) => {
+    ocrWorkerPending.set(requestId, { resolve, reject });
+    try {
+      thread.postMessage(
+        {
+          type: 'recognize',
+          requestId,
+          image: bytes,
+        },
+        [bytes.buffer],
+      );
+    } catch (error) {
+      settleOcrRequest(requestId, error);
+    }
+  });
+}
+
+async function disposeOcrWorkerThread() {
+  if (!ocrWorkerThread) {
+    return;
   }
 
-  const left = Math.max(0, Math.min(maxWidth, x));
-  const top = Math.max(0, Math.min(maxHeight, y));
-  const right = Math.max(0, Math.min(maxWidth, x + width));
-  const bottom = Math.max(0, Math.min(maxHeight, y + height));
-  const normalizedWidth = right - left;
-  const normalizedHeight = bottom - top;
+  const thread = ocrWorkerThread;
+  ocrWorkerThread = null;
 
-  if (normalizedWidth < MIN_REGION_SIZE || normalizedHeight < MIN_REGION_SIZE) {
-    return null;
+  try {
+    await thread.terminate();
+  } catch {
+    // Ignore cleanup failures.
   }
 
-  return {
-    x: left,
-    y: top,
-    width: normalizedWidth,
-    height: normalizedHeight,
-  };
+  for (const requestId of ocrWorkerPending.keys()) {
+    settleOcrRequest(requestId, new Error('OCR worker terminated.'));
+  }
 }
 
 async function captureAroundCursor() {
@@ -388,33 +406,6 @@ async function captureAroundCursor() {
   return cropped.getBufferAsync(Jimp.MIME_PNG);
 }
 
-async function captureDisplayRegion(display, region) {
-  let buffer = null;
-  try {
-    buffer = await screenshot({ format: 'png', screen: display.id });
-  } catch {
-    buffer = await screenshot({ format: 'png' });
-  }
-
-  const image = await Jimp.read(buffer);
-  const scaleX = image.bitmap.width / Math.max(display.bounds.width, 1);
-  const scaleY = image.bitmap.height / Math.max(display.bounds.height, 1);
-
-  const cropX = Math.max(0, Math.min(image.bitmap.width - 1, Math.round(region.x * scaleX)));
-  const cropY = Math.max(0, Math.min(image.bitmap.height - 1, Math.round(region.y * scaleY)));
-  const desiredWidth = Math.max(1, Math.round(region.width * scaleX));
-  const desiredHeight = Math.max(1, Math.round(region.height * scaleY));
-  const cropW = Math.min(desiredWidth, image.bitmap.width - cropX);
-  const cropH = Math.min(desiredHeight, image.bitmap.height - cropY);
-
-  if (cropW <= 0 || cropH <= 0) {
-    throw new Error('Selected region is outside capture bounds.');
-  }
-
-  const cropped = image.clone().crop(cropX, cropY, cropW, cropH);
-  return cropped.getBufferAsync(Jimp.MIME_PNG);
-}
-
 async function runOcrCapture(captureFn, captureMessage) {
   if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
     return false;
@@ -425,22 +416,8 @@ async function runOcrCapture(captureFn, captureMessage) {
 
   try {
     const imageBuffer = await captureFn();
-    const worker = await getWorker();
-    const inputs = await buildOcrPassBuffers(imageBuffer);
-    const candidates = [];
-
-    for (let index = 0; index < inputs.length; index += 1) {
-      const pass = inputs[index];
-      overlayWindow.webContents.send('ocr-status', `Running OCR (${pass.label} ${index + 1}/${inputs.length})...`);
-
-      const result = await worker.recognize(pass.buffer);
-      candidates.push({
-        text: normalizeRecognizedText(result?.data?.text),
-        confidence: Number.isFinite(result?.data?.confidence) ? result.data.confidence : null,
-      });
-    }
-
-    const bestResult = selectBestOcrCandidate(candidates);
+    overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
+    const bestResult = await runWorkerOcr(imageBuffer);
 
     overlayWindow.webContents.send('ocr-result', {
       text: bestResult.text,
@@ -462,8 +439,12 @@ async function runOcrCapture(captureFn, captureMessage) {
 }
 
 function clearSelectionContext() {
-  selectionDisplayId = null;
   setOverlayMode(OVERLAY_MODES.CONSOLE);
+
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.setResizable(true);
+    overlayWindow.setMovable(true);
+  }
 }
 
 function hideOverlay() {
@@ -480,6 +461,8 @@ function showOverlayForCapture() {
     applyConsoleWindowBounds(getCursorDisplay());
   }
 
+  overlayWindow.setResizable(true);
+  overlayWindow.setMovable(true);
   setOverlayMode(OVERLAY_MODES.CONSOLE);
   setOverlayInteractivity(true);
   overlayWindow.show();
@@ -500,71 +483,17 @@ function toggleOverlayAndCapture() {
 function startRegionSelection() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
-  if (overlayWindow.isVisible() && overlayMode === OVERLAY_MODES.SELECTING) {
+  if (overlayWindow.isVisible()) {
     hideOverlay();
     return;
   }
 
-  const display = getCursorDisplay();
-  selectionDisplayId = display.id;
-
-  if (!overlayBridgeInitialized) {
-    rememberConsoleWindowBounds();
-  }
-
-  if (!overlayBridgeInitialized) {
-    positionOverlayToDisplay(display);
-  }
-
-  setOverlayMode(OVERLAY_MODES.SELECTING);
-  overlayWindow.show();
-  setOverlayInteractivity(true);
-  overlayWindow.webContents.send('ocr-status', 'Draw a rectangle to OCR. Press Esc to cancel.');
-}
-
-function resolveSelectionDisplay() {
-  const fromSelection = getDisplayById(selectionDisplayId);
-  if (fromSelection) return fromSelection;
-  return getCursorDisplay();
+  showOverlayForCapture();
+  void runOcrCapture(captureAroundCursor, 'Capturing screen...');
 }
 
 function registerOverlayIpc() {
-  ipcMain.handle('overlay:ocr-region', async (_event, payload) => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) {
-      return { ok: false, error: 'Overlay window is not available.' };
-    }
-
-    if (isCapturing) {
-      return { ok: false, error: 'OCR capture is already running.' };
-    }
-
-    const display = resolveSelectionDisplay();
-    const normalizedRegion = normalizeRegion(payload, display.bounds.width, display.bounds.height);
-    if (!normalizedRegion) {
-      return { ok: false, error: `Selection must be at least ${MIN_REGION_SIZE}px by ${MIN_REGION_SIZE}px.` };
-    }
-
-    setOverlayMode(OVERLAY_MODES.CONSOLE);
-    if (!overlayBridgeInitialized) {
-      applyConsoleWindowBounds(display);
-    }
-    setOverlayInteractivity(true);
-    overlayWindow.show();
-
-    const captured = await runOcrCapture(
-      () => captureDisplayRegion(display, normalizedRegion),
-      'Capturing selected region...',
-    );
-
-    selectionDisplayId = null;
-    if (!captured) {
-      return { ok: false, error: 'OCR failed. See error output for details.' };
-    }
-
-    return { ok: true };
-  });
-
-  ipcMain.on('overlay:selection-cancel', () => {
+  ipcMain.on('overlay:hide-console', () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return;
     }
@@ -709,7 +638,13 @@ function createHotkeyManager({ onQuickCapture, onRegionSelection }) {
 }
 
 function configureOptionalOverlayBridge() {
-  if (!overlayWindow || !overlayWindowBackend?.controller || !OVERLAY_TARGET_TITLE || overlayBridgeInitialized) {
+  if (
+    !ENABLE_OVERLAY_ATTACH ||
+    !overlayWindow ||
+    !overlayWindowBackend?.controller ||
+    !OVERLAY_TARGET_TITLE ||
+    overlayBridgeInitialized
+  ) {
     return false;
   }
 
@@ -812,12 +747,6 @@ function installDisplaySync() {
       return;
     }
 
-    if (overlayMode === OVERLAY_MODES.SELECTING) {
-      const display = getDisplayById(selectionDisplayId) || getCursorDisplay();
-      positionOverlayToDisplay(display);
-      return;
-    }
-
     const sourceBounds = consoleWindowBounds || overlayWindow.getBounds();
     const centerPoint = {
       x: sourceBounds.x + Math.round(sourceBounds.width / 2),
@@ -839,6 +768,9 @@ function installDisplaySync() {
 }
 
 app.whenReady().then(() => {
+  ensureOcrWorkerThread().catch((error) => {
+    console.warn('[overlayFuzz] OCR worker warm-up failed:', error.message || error);
+  });
   registerOverlayIpc();
   createOverlayWindow();
   displaySyncCleanup = installDisplaySync();
@@ -863,17 +795,8 @@ app.on('will-quit', async () => {
   }
 
   globalShortcut.unregisterAll();
-  ipcMain.removeHandler('overlay:ocr-region');
-  ipcMain.removeAllListeners('overlay:selection-cancel');
-
-  if (workerPromise) {
-    try {
-      const worker = await workerPromise;
-      await worker.terminate();
-    } catch {
-      // Ignore cleanup errors.
-    }
-  }
+  ipcMain.removeAllListeners('overlay:hide-console');
+  await disposeOcrWorkerThread();
 });
 
 app.on('window-all-closed', () => {

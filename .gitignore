@@ -21,3 +21,6 @@ src/tessdata/
 # Environment
 .env
 .env.local
+
+# Local upstream reference clone
+Exiled-Exchange-2/
