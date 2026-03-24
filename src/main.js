@@ -18,6 +18,15 @@ const OVERLAY_MODES = {
   SELECTING: 'selecting',
 };
 const MIN_REGION_SIZE = 6;
+const CONSOLE_MIN_SIZE = { width: 520, height: 360 };
+const CONSOLE_DEFAULT_SIZE = { width: 760, height: 540 };
+const CONSOLE_WINDOW_MARGIN = 28;
+const OCR_UPSCALE_THRESHOLD = 1600;
+const OCR_THRESHOLD_MAX = 165;
+const OCR_PASSES = [
+  { label: 'balanced', contrast: 0.38, threshold: false },
+  { label: 'high-contrast', contrast: 0.64, threshold: true },
+];
 
 let overlayWindow = null;
 let isCapturing = false;
@@ -28,6 +37,7 @@ let overlayBridgeInitialized = false;
 let isAppQuitting = false;
 let overlayMode = OVERLAY_MODES.CONSOLE;
 let selectionDisplayId = null;
+let consoleWindowBounds = null;
 
 function safeRequire(moduleName) {
   try {
@@ -90,16 +100,18 @@ const overlayWindowBackend = resolveOverlayWindowBackend();
 function getOverlayWindowOptions() {
   return {
     ...(overlayWindowBackend?.defaults || {}),
-    width: 800,
-    height: 600,
+    width: CONSOLE_DEFAULT_SIZE.width,
+    height: CONSOLE_DEFAULT_SIZE.height,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    resizable: false,
-    movable: false,
+    resizable: true,
+    movable: true,
+    minWidth: CONSOLE_MIN_SIZE.width,
+    minHeight: CONSOLE_MIN_SIZE.height,
     hasShadow: false,
-    focusable: false,
+    focusable: true,
     fullscreenable: false,
     show: false,
     webPreferences: {
@@ -128,6 +140,69 @@ function positionOverlayToDisplay(display) {
 function positionOverlayToCursorDisplay() {
   if (!overlayWindow) return;
   positionOverlayToDisplay(getCursorDisplay());
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getDisplayWorkArea(display) {
+  return display?.workArea || display?.bounds || null;
+}
+
+function getConsoleBoundsForDisplay(display, sourceBounds = null) {
+  const workArea = getDisplayWorkArea(display);
+  if (!workArea) {
+    return sourceBounds || consoleWindowBounds || { ...CONSOLE_DEFAULT_SIZE, x: 0, y: 0 };
+  }
+
+  const rawBounds =
+    sourceBounds ||
+    consoleWindowBounds || {
+      width: Math.min(CONSOLE_DEFAULT_SIZE.width, workArea.width),
+      height: Math.min(CONSOLE_DEFAULT_SIZE.height, workArea.height),
+      x: workArea.x + workArea.width - CONSOLE_DEFAULT_SIZE.width - CONSOLE_WINDOW_MARGIN,
+      y: workArea.y + CONSOLE_WINDOW_MARGIN,
+    };
+
+  const width = clamp(Math.round(rawBounds.width), CONSOLE_MIN_SIZE.width, workArea.width);
+  const height = clamp(Math.round(rawBounds.height), CONSOLE_MIN_SIZE.height, workArea.height);
+  const maxX = workArea.x + workArea.width - width;
+  const maxY = workArea.y + workArea.height - height;
+  const x = clamp(Math.round(rawBounds.x), workArea.x, maxX);
+  const y = clamp(Math.round(rawBounds.y), workArea.y, maxY);
+
+  return { x, y, width, height };
+}
+
+function applyConsoleWindowBounds(display = getCursorDisplay(), sourceBounds = null) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  const nextBounds = getConsoleBoundsForDisplay(display, sourceBounds);
+  consoleWindowBounds = nextBounds;
+  overlayWindow.setBounds(nextBounds, false);
+}
+
+function rememberConsoleWindowBounds() {
+  if (
+    !overlayWindow ||
+    overlayWindow.isDestroyed() ||
+    overlayMode !== OVERLAY_MODES.CONSOLE ||
+    !overlayWindow.isVisible() ||
+    overlayBridgeInitialized
+  ) {
+    return;
+  }
+
+  const currentBounds = overlayWindow.getBounds();
+  const centerPoint = {
+    x: currentBounds.x + Math.round(currentBounds.width / 2),
+    y: currentBounds.y + Math.round(currentBounds.height / 2),
+  };
+  const display = screen.getDisplayNearestPoint(centerPoint);
+  consoleWindowBounds = getConsoleBoundsForDisplay(display, currentBounds);
 }
 
 function emitOverlayMode() {
@@ -177,10 +252,78 @@ function setOverlayInteractivity(interactive) {
 
 async function getWorker() {
   if (!workerPromise) {
-    workerPromise = Tesseract.createWorker('eng');
+    workerPromise = (async () => {
+      const worker = await Tesseract.createWorker('eng');
+
+      try {
+        await worker.setParameters({
+          tessedit_pageseg_mode: '6',
+          preserve_interword_spaces: '1',
+        });
+      } catch {
+        // Not all engines support every runtime parameter.
+      }
+
+      return worker;
+    })();
   }
 
   return workerPromise;
+}
+
+function normalizeRecognizedText(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function buildOcrPassBuffers(imageBuffer) {
+  const source = await Jimp.read(imageBuffer);
+  const shouldUpscale = Math.max(source.bitmap.width, source.bitmap.height) < OCR_UPSCALE_THRESHOLD;
+  const scaleFactor = shouldUpscale ? 2 : 1;
+  const buffers = [];
+
+  for (const pass of OCR_PASSES) {
+    const image = source.clone().greyscale().normalize().contrast(pass.contrast);
+
+    if (shouldUpscale) {
+      image.resize(
+        Math.max(1, Math.round(source.bitmap.width * scaleFactor)),
+        Math.max(1, Math.round(source.bitmap.height * scaleFactor)),
+        Jimp.RESIZE_BICUBIC,
+      );
+    }
+
+    if (pass.threshold) {
+      image.threshold({ max: OCR_THRESHOLD_MAX });
+    }
+
+    buffers.push({
+      label: pass.label,
+      buffer: await image.getBufferAsync(Jimp.MIME_PNG),
+    });
+  }
+
+  return buffers;
+}
+
+function scoreOcrCandidate(candidate) {
+  const textLengthBoost = Math.min(candidate.text.length, 180) * 0.12;
+  const emptyPenalty = candidate.text.length > 0 ? 0 : 40;
+  return (candidate.confidence || 0) + textLengthBoost - emptyPenalty;
+}
+
+function selectBestOcrCandidate(candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return { text: '', confidence: null };
+  }
+
+  return candidates.reduce((best, current) => {
+    return scoreOcrCandidate(current) > scoreOcrCandidate(best) ? current : best;
+  });
 }
 
 function normalizeRegion(region, maxWidth, maxHeight) {
@@ -282,14 +425,26 @@ async function runOcrCapture(captureFn, captureMessage) {
 
   try {
     const imageBuffer = await captureFn();
-    overlayWindow.webContents.send('ocr-status', 'Running OCR...');
-
     const worker = await getWorker();
-    const result = await worker.recognize(imageBuffer);
+    const inputs = await buildOcrPassBuffers(imageBuffer);
+    const candidates = [];
+
+    for (let index = 0; index < inputs.length; index += 1) {
+      const pass = inputs[index];
+      overlayWindow.webContents.send('ocr-status', `Running OCR (${pass.label} ${index + 1}/${inputs.length})...`);
+
+      const result = await worker.recognize(pass.buffer);
+      candidates.push({
+        text: normalizeRecognizedText(result?.data?.text),
+        confidence: Number.isFinite(result?.data?.confidence) ? result.data.confidence : null,
+      });
+    }
+
+    const bestResult = selectBestOcrCandidate(candidates);
 
     overlayWindow.webContents.send('ocr-result', {
-      text: (result.data.text || '').trim(),
-      confidence: result.data.confidence ?? null,
+      text: bestResult.text,
+      confidence: bestResult.confidence,
     });
     overlayWindow.webContents.send('ocr-status', 'Done');
     return true;
@@ -309,25 +464,25 @@ async function runOcrCapture(captureFn, captureMessage) {
 function clearSelectionContext() {
   selectionDisplayId = null;
   setOverlayMode(OVERLAY_MODES.CONSOLE);
-  setOverlayInteractivity(false);
 }
 
 function hideOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   clearSelectionContext();
+  setOverlayInteractivity(false);
   overlayWindow.hide();
 }
 
 function showOverlayForCapture() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
-  if (!overlayBridgeInitialized && !overlayWindow.isVisible()) {
-    positionOverlayToCursorDisplay();
+  if (!overlayBridgeInitialized) {
+    applyConsoleWindowBounds(getCursorDisplay());
   }
 
   setOverlayMode(OVERLAY_MODES.CONSOLE);
-  setOverlayInteractivity(false);
-  overlayWindow.showInactive();
+  setOverlayInteractivity(true);
+  overlayWindow.show();
 }
 
 function toggleOverlayAndCapture() {
@@ -352,6 +507,10 @@ function startRegionSelection() {
 
   const display = getCursorDisplay();
   selectionDisplayId = display.id;
+
+  if (!overlayBridgeInitialized) {
+    rememberConsoleWindowBounds();
+  }
 
   if (!overlayBridgeInitialized) {
     positionOverlayToDisplay(display);
@@ -386,8 +545,11 @@ function registerOverlayIpc() {
     }
 
     setOverlayMode(OVERLAY_MODES.CONSOLE);
-    setOverlayInteractivity(false);
-    overlayWindow.showInactive();
+    if (!overlayBridgeInitialized) {
+      applyConsoleWindowBounds(display);
+    }
+    setOverlayInteractivity(true);
+    overlayWindow.show();
 
     const captured = await runOcrCapture(
       () => captureDisplayRegion(display, normalizedRegion),
@@ -592,6 +754,14 @@ function createOverlayWindow() {
     overlayWindow = null;
   });
 
+  overlayWindow.on('move', () => {
+    rememberConsoleWindowBounds();
+  });
+
+  overlayWindow.on('resize', () => {
+    rememberConsoleWindowBounds();
+  });
+
   configureOptionalOverlayBridge();
 }
 
@@ -648,7 +818,13 @@ function installDisplaySync() {
       return;
     }
 
-    positionOverlayToCursorDisplay();
+    const sourceBounds = consoleWindowBounds || overlayWindow.getBounds();
+    const centerPoint = {
+      x: sourceBounds.x + Math.round(sourceBounds.width / 2),
+      y: sourceBounds.y + Math.round(sourceBounds.height / 2),
+    };
+    const display = screen.getDisplayNearestPoint(centerPoint);
+    applyConsoleWindowBounds(display, sourceBounds);
   };
 
   screen.on('display-added', syncOverlay);

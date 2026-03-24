@@ -44,6 +44,8 @@ const stageLabel = computed(() => {
   }
 });
 
+const stageClass = computed(() => `stage-${stage.value}`);
+
 const confidenceValue = computed(() =>
   confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`,
 );
@@ -51,21 +53,6 @@ const confidenceValue = computed(() =>
 const confidenceWidth = computed(() => {
   const raw = confidence.value ?? 0;
   return `${Math.max(0, Math.min(100, raw))}%`;
-});
-
-const stageClass = computed(() => {
-  switch (stage.value) {
-    case 'capturing':
-      return 'border-cyan-400/30 shadow-[0_30px_100px_rgba(34,211,238,0.18)]';
-    case 'processing':
-      return 'border-amber-300/30 shadow-[0_30px_100px_rgba(251,191,36,0.18)]';
-    case 'done':
-      return 'border-emerald-300/30 shadow-[0_30px_100px_rgba(52,211,153,0.18)]';
-    case 'error':
-      return 'border-rose-400/30 shadow-[0_30px_100px_rgba(251,113,133,0.18)]';
-    default:
-      return 'border-white/10 shadow-[0_30px_100px_rgba(3,8,25,0.55)]';
-  }
 });
 
 const selectionRect = computed<OverlayRegion | null>(() => {
@@ -271,80 +258,55 @@ onUnmounted(() => {
 
 <template>
   <div class="relative h-screen w-screen overflow-hidden bg-transparent text-white">
-    <main v-if="overlayMode === 'console'" class="relative flex h-full items-start justify-end p-4 sm:p-6">
-      <section
-        class="relative w-full max-w-[38rem] overflow-hidden rounded-[2rem] border bg-ink-900/[0.82] p-5 shadow-glow backdrop-blur-3xl sm:p-6"
-        :class="stageClass"
-      >
-        <div class="pointer-events-none absolute -left-16 top-10 h-32 w-32 rounded-full bg-mint-400/[0.14] blur-3xl" />
-        <div class="pointer-events-none absolute -right-10 bottom-16 h-40 w-40 rounded-full bg-sky-400/[0.12] blur-3xl" />
-        <div class="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/30 to-transparent" />
-        <div class="absolute inset-y-0 right-0 w-24 bg-gradient-to-l from-white/10 to-transparent" />
-
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <p class="text-[0.72rem] uppercase tracking-[0.42em] text-mint-300/[0.7]">OverlayFuzz</p>
-            <h1 class="mt-2 text-2xl font-display font-semibold tracking-tight sm:text-[1.85rem]">
-              OCR capture console
-            </h1>
+    <main v-if="overlayMode === 'console'" class="h-full w-full p-2">
+      <section class="console-shell" :class="stageClass">
+        <header class="console-titlebar drag-region">
+          <div class="titlebar-left">
+            <p class="titlebar-app">OverlayFuzz</p>
+            <p class="titlebar-subtitle">OCR Console</p>
           </div>
-
-          <div
-            class="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[0.7rem] uppercase tracking-[0.32em] text-slate-200"
-          >
-            {{ stageLabel }}
+          <div class="titlebar-right">
+            <span class="state-pill">{{ stageLabel }}</span>
+            <span class="bridge-pill no-drag">{{ bridgeReady ? 'Bridge Online' : 'Bridge Offline' }}</span>
           </div>
-        </div>
+        </header>
 
-        <p class="mt-4 max-w-[34rem] text-sm leading-6 text-slate-300">
-          {{ status }}
-        </p>
+        <div class="console-body no-drag">
+          <p class="status-text">
+            {{ status }}
+          </p>
 
-        <div class="mt-5 rounded-[1.5rem] border border-white/10 bg-white/5 p-4">
-          <div class="flex items-center justify-between gap-3">
-            <div class="text-[0.7rem] uppercase tracking-[0.32em] text-slate-400">Detected text</div>
-            <div class="text-[0.7rem] uppercase tracking-[0.24em] text-slate-500">
-              {{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}
+          <div class="result-panel">
+            <div class="result-topline">
+              <span>Detected Text</span>
+              <span>{{ lastUpdate }}</span>
+            </div>
+            <Transition name="fade-swap" mode="out-in">
+              <pre :key="result" class="result-output">{{ result }}</pre>
+            </Transition>
+            <div class="confidence-track">
+              <div class="confidence-fill" :style="{ width: confidenceWidth }" />
             </div>
           </div>
 
-          <Transition name="fade-swap" mode="out-in">
-            <pre
-              :key="result"
-              class="mt-3 min-h-[12rem] whitespace-pre-wrap break-words font-mono text-[0.98rem] leading-7 text-slate-50"
-            >{{ result }}</pre>
-          </Transition>
-
-          <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-slate-800">
-            <div
-              class="h-full rounded-full bg-gradient-to-r from-mint-400 via-sky-400 to-amber-300 transition-[width] duration-500 ease-out"
-              :style="{ width: confidenceWidth }"
-            />
-          </div>
-        </div>
-
-        <div class="mt-4 grid gap-3 sm:grid-cols-2">
-          <div class="rounded-[1.25rem] border border-white/10 bg-white/5 p-4">
-            <div class="text-[0.7rem] uppercase tracking-[0.28em] text-slate-400">Confidence</div>
-            <div class="mt-2 flex items-end justify-between gap-4">
-              <div class="text-3xl font-semibold tracking-tight text-white">{{ confidenceValue }}</div>
-              <div class="text-xs uppercase tracking-[0.24em] text-slate-500">0 - 100 scale</div>
+          <div class="meta-grid">
+            <div class="meta-card">
+              <p class="meta-label">Confidence</p>
+              <p class="meta-value">{{ confidenceValue }}</p>
+            </div>
+            <div class="meta-card">
+              <p class="meta-label">Error</p>
+              <p class="meta-error">{{ error || 'No errors reported.' }}</p>
             </div>
           </div>
 
-          <div class="rounded-[1.25rem] border border-white/10 bg-white/5 p-4">
-            <div class="text-[0.7rem] uppercase tracking-[0.28em] text-slate-400">Error</div>
-            <p class="mt-2 min-h-[3.5rem] text-sm leading-6 text-slate-200">
-              {{ error || 'No errors reported.' }}
-            </p>
-          </div>
+          <footer class="console-footer">
+            <span>Quick: {{ quickHotkey }}</span>
+            <span>Region: {{ regionHotkey }}</span>
+            <span>Drag title bar. Resize from window edges.</span>
+          </footer>
         </div>
-
-        <div class="mt-4 flex flex-wrap items-center justify-between gap-3 text-[0.66rem] uppercase tracking-[0.24em] text-slate-500">
-          <span>Quick OCR: {{ quickHotkey }}</span>
-          <span>Region OCR: {{ regionHotkey }}</span>
-          <span>{{ lastUpdate }}</span>
-        </div>
+        <div class="resize-grip no-drag" aria-hidden="true" />
       </section>
     </main>
 
@@ -391,6 +353,236 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.console-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background:
+    radial-gradient(circle at 22% -12%, rgba(92, 214, 255, 0.14), transparent 42%),
+    radial-gradient(circle at 100% 120%, rgba(255, 183, 76, 0.1), transparent 44%),
+    linear-gradient(180deg, rgba(10, 17, 31, 0.94), rgba(5, 10, 20, 0.95));
+  box-shadow:
+    0 26px 90px rgba(2, 8, 25, 0.62),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.console-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.25;
+  background-image: linear-gradient(to bottom, rgba(164, 186, 235, 0.1) 1px, transparent 1px);
+  background-size: 100% 18px;
+}
+
+.console-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+}
+
+.titlebar-left {
+  min-width: 0;
+}
+
+.titlebar-app {
+  margin: 0;
+  font-size: 0.68rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(163, 230, 249, 0.88);
+}
+
+.titlebar-subtitle {
+  margin: 4px 0 0;
+  font-size: 0.88rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.86);
+}
+
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.state-pill,
+.bridge-pill {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 4px 9px;
+  font-size: 0.64rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.92);
+}
+
+.console-body {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  gap: 10px;
+  height: calc(100% - 61px);
+  padding: 12px;
+}
+
+.status-text {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: rgba(203, 213, 225, 0.9);
+}
+
+.result-panel {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.65);
+  overflow: hidden;
+}
+
+.result-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 8px 10px;
+  font-size: 0.65rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.92);
+}
+
+.result-output {
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: rgba(241, 245, 249, 0.96);
+  font-family: 'SFMono-Regular', Consolas, Monaco, monospace;
+}
+
+.confidence-track {
+  height: 4px;
+  background: rgba(15, 23, 42, 0.8);
+}
+
+.confidence-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(125, 211, 252, 0.9), rgba(74, 222, 128, 0.92), rgba(251, 191, 36, 0.94));
+  transition: width 0.26s ease;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.meta-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 9px 10px;
+}
+
+.meta-label {
+  margin: 0;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.meta-value {
+  margin: 6px 0 0;
+  font-size: 1.4rem;
+  line-height: 1;
+  font-weight: 600;
+  color: rgba(248, 250, 252, 0.96);
+}
+
+.meta-error {
+  margin: 6px 0 0;
+  min-height: 2.8rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: rgba(241, 245, 249, 0.88);
+}
+
+.console-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgba(148, 163, 184, 0.86);
+}
+
+.resize-grip {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 12px;
+  height: 12px;
+  border-right: 2px solid rgba(148, 163, 184, 0.75);
+  border-bottom: 2px solid rgba(148, 163, 184, 0.75);
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.stage-capturing {
+  border-color: rgba(56, 189, 248, 0.52);
+}
+
+.stage-processing {
+  border-color: rgba(251, 191, 36, 0.52);
+}
+
+.stage-done {
+  border-color: rgba(74, 222, 128, 0.52);
+}
+
+.stage-error {
+  border-color: rgba(251, 113, 133, 0.58);
+}
+
+.stage-error .meta-error {
+  color: rgba(254, 205, 211, 0.96);
+}
+
 .fade-swap-enter-active,
 .fade-swap-leave-active {
   transition:
@@ -402,5 +594,15 @@ onUnmounted(() => {
 .fade-swap-leave-to {
   opacity: 0;
   transform: translateY(8px);
+}
+
+@media (max-width: 780px) {
+  .meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .titlebar-right {
+    justify-content: flex-start;
+  }
 }
 </style>
