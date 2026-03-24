@@ -1,25 +1,37 @@
 # OverlayFuzz
 
-Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's tech approach (Electron overlay window + OCR + global hotkeys).
+Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's approach (overlay window + OCR + global input hooks).
 
 ## What it does
-- Press `Ctrl/Cmd + Shift + O` to show a transparent overlay and OCR the area around your cursor.
-- The overlay displays the recognized text and OCR confidence.
+- Press `Ctrl/Cmd + Shift + O` to show a transparent overlay and OCR around your cursor.
+- Overlay UI shows OCR text, confidence, status, and error state.
 - Press the same hotkey again to hide the overlay.
+
+## Stack
+- Electron main process (`src/main.js`) orchestrates capture, OCR, and global input hooks.
+- Optional hook backends:
+  - `uiohook-napi` for low-level global input events.
+  - Electron `globalShortcut` fallback when `uiohook-napi` is unavailable.
+- Optional `electron-overlay-window` bridge via `OVERLAY_FUZZ_TARGET_WINDOW_TITLE`.
+- Renderer stack scaffold under `renderer/`:
+  - Vue 3 + Vite + TypeScript + Tailwind CSS.
+- Legacy plain renderer fallback under `src/renderer/` remains available.
 
 ## Setup
 1. Install dependencies:
-   - `npm install`
-2. Run the app:
-   - `npm run dev`
+   - `bun install`
+2. Run full dev mode (Vite + Electron):
+   - `bun run dev`
+3. Build renderer bundle:
+   - `bun run build:renderer`
+4. Run Electron directly:
+   - `bun run start`
+5. Optional npm fallback:
+   - `npm install && npm run dev`
 
 ## Notes
-- On macOS, you must grant Screen Recording permission to the Electron app for screenshots/OCR to work.
-- The OCR worker is provided by `tesseract.js`. If you want to use offline language data, place `eng.traineddata` under `src/tessdata/` and update `createWorker` options.
-- Adjust the capture size in `src/main.js` (`CAPTURE_SIZE`).
-
-## Tech choices
-- Electron main process for global hotkey + capture orchestration.
-- Transparent always-on-top renderer for overlay UI.
-- `screenshot-desktop` + `jimp` for capture and cropping.
-- `tesseract.js` for OCR.
+- On macOS, grant Screen Recording permission for capture/OCR.
+- `uiohook-napi` and `electron-overlay-window` are optional dependencies, so installs can still succeed if native builds are unavailable.
+- To enable overlay attachment by title, set:
+  - `OVERLAY_FUZZ_TARGET_WINDOW_TITLE="<target window title>"`
+- Adjust OCR capture size in `src/main.js` via `CAPTURE_SIZE`.

@@ -6,13 +6,42 @@
     <title>OverlayFuzz</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
-    <div class="overlay">
-      <div class="panel">
-        <div class="title">OverlayFuzz OCR</div>
-        <div class="status" id="status">Press Ctrl/Cmd + Shift + O to capture.</div>
-        <pre class="result" id="result">Waiting for OCR...</pre>
-        <div class="meta" id="meta"></div>
+  <body data-state="idle">
+    <div class="scene">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+      <div class="ambient ambient-c"></div>
+      <div class="overlay">
+        <section class="panel">
+          <div class="panel__header">
+            <div>
+              <div class="eyebrow">OverlayFuzz</div>
+              <h1 class="title">OCR capture console</h1>
+            </div>
+            <div class="state-pill" id="statePill">Idle</div>
+          </div>
+          <div class="status" id="status">Press Ctrl/Cmd + Shift + O to capture.</div>
+          <div class="result-card">
+            <div class="card-label">Detected text</div>
+            <pre class="result" id="result">Waiting for OCR...</pre>
+            <div class="scanline"></div>
+          </div>
+          <div class="metrics">
+            <div class="metric">
+              <div class="metric__label">Confidence</div>
+              <div class="metric__value" id="confidenceValue">--</div>
+              <div class="meter" aria-hidden="true"><span id="confidenceBar"></span></div>
+            </div>
+            <div class="metric">
+              <div class="metric__label">Error</div>
+              <div class="metric__value metric__value--small" id="errorValue">No errors reported.</div>
+            </div>
+          </div>
+          <div class="footer">
+            <div id="meta">Bridge ready</div>
+            <div class="hotkey">Ctrl/Cmd + Shift + O</div>
+          </div>
+        </section>
       </div>
     </div>
     <script src="renderer.js"></script>
