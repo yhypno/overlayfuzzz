@@ -1,0 +1,25 @@
+{
+  "name": "overlayfuzz",
+  "version": "0.1.0",
+  "description": "Lightweight desktop overlay with OCR hotkey capture (Exiled-Exchange-2-inspired tech stack).",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "keywords": [
+    "electron",
+    "ocr",
+    "overlay",
+    "tesseract",
+    "screenshot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^29.3.0",
+    "jimp": "^0.22.10",
+    "screenshot-desktop": "^1.15.0",
+    "tesseract.js": "^5.1.0"
+  }
+}
