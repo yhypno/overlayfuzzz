@@ -1,9 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppTitlebar from './components/AppTitlebar.vue';
 import type { OverlayModePayload, OverlayResult } from './types/overlay';
 
 type Stage = 'idle' | 'capturing' | 'processing' | 'done' | 'error';
+type Page = 'console' | 'settings';
+
+interface UiPreferences {
+  compactLayout: boolean;
+  showConfidenceMeter: boolean;
+  showFooterHints: boolean;
+  animateTextUpdates: boolean;
+}
+
+const SETTINGS_STORAGE_KEY = 'overlayfuzz-ui-settings';
 
 const status = ref('Press Ctrl/Cmd + Shift + O for quick OCR. Ctrl/Cmd + Shift + R mirrors quick OCR.');
 const result = ref('Waiting for OCR...');
@@ -13,6 +23,14 @@ const bridgeReady = ref(false);
 const lastUpdate = ref('Idle');
 const quickHotkey = ref('Ctrl/Cmd + Shift + O');
 const regionHotkey = ref('Ctrl/Cmd + Shift + R');
+const activePage = ref<Page>('console');
+
+const preferences = ref<UiPreferences>({
+  compactLayout: false,
+  showConfidenceMeter: true,
+  showFooterHints: true,
+  animateTextUpdates: true,
+});
 
 const stage = computed<Stage>(() => {
   if (error.value) return 'error';
@@ -40,6 +58,10 @@ const stageLabel = computed(() => {
 });
 
 const stageClass = computed(() => `stage-${stage.value}`);
+const shellClass = computed(() => ({
+  [stageClass.value]: true,
+  compact: preferences.value.compactLayout,
+}));
 
 const confidenceValue = computed(() =>
   confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`,
@@ -87,23 +109,64 @@ function applyMode(payload: OverlayModePayload) {
   }
 }
 
-function hideConsole() {
+function loadPreferences() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Partial<UiPreferences>;
+
+    preferences.value = {
+      compactLayout: Boolean(parsed.compactLayout),
+      showConfidenceMeter: parsed.showConfidenceMeter !== false,
+      showFooterHints: parsed.showFooterHints !== false,
+      animateTextUpdates: parsed.animateTextUpdates !== false,
+    };
+  } catch {
+    // Ignore malformed local settings and keep defaults.
+  }
+}
+
+watch(
+  preferences,
+  (next) => {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
+  },
+  { deep: true },
+);
+
+async function hideConsole() {
   if (!window.overlayApi?.hideOverlay) {
     return;
   }
 
-  window.overlayApi.hideOverlay();
+  try {
+    await window.overlayApi.hideOverlay();
+  } catch {
+    // Ignore hide errors to avoid blocking the UI.
+  }
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (event.key !== 'Escape') return;
-  event.preventDefault();
-  hideConsole();
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    if (activePage.value === 'settings') {
+      activePage.value = 'console';
+      return;
+    }
+    void hideConsole();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === ',') {
+    event.preventDefault();
+    activePage.value = 'settings';
+  }
 }
 
 onMounted(() => {
   bridgeReady.value = Boolean(window.overlayApi);
   window.addEventListener('keydown', onWindowKeydown);
+  loadPreferences();
 
   if (!window.overlayApi) return;
 
@@ -129,10 +192,16 @@ onUnmounted(() => {
   <div class="relative h-screen w-screen overflow-hidden bg-transparent text-white">
     <main id="overlay-window" class="relative h-full w-full overflow-hidden">
       <div class="overlay-bg" />
-      <section class="console-shell widget-default-style" :class="stageClass">
-        <AppTitlebar title="OCR Console" @close="hideConsole" />
+      <section class="console-shell widget-default-style" :class="shellClass">
+        <AppTitlebar
+          title="OCR Console"
+          :active-page="activePage"
+          @console="activePage = 'console'"
+          @settings="activePage = 'settings'"
+          @close="hideConsole"
+        />
 
-        <div class="console-body no-drag">
+        <div class="console-body no-drag" v-if="activePage === 'console'">
           <div class="status-row">
             <span class="status-label">Status</span>
             <span class="status-value">{{ status }}</span>
@@ -144,13 +213,14 @@ onUnmounted(() => {
               <span>Detected text</span>
               <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
             </div>
-            <Transition name="fade-swap" mode="out-in">
+            <Transition v-if="preferences.animateTextUpdates" name="fade-swap" mode="out-in">
               <pre :key="result" class="result-output">{{ result }}</pre>
             </Transition>
+            <pre v-else class="result-output">{{ result }}</pre>
           </section>
 
-          <section class="metrics-row">
-            <div class="metric-chip">
+          <section class="metrics-row" :class="{ single: !preferences.showConfidenceMeter }">
+            <div class="metric-chip" v-if="preferences.showConfidenceMeter">
               <span class="metric-label">Confidence</span>
               <span class="metric-value">{{ confidenceValue }}</span>
               <span class="metric-meter"><span :style="{ width: confidenceWidth }" /></span>
@@ -161,12 +231,56 @@ onUnmounted(() => {
             </div>
           </section>
 
-          <footer class="console-footer">
+          <footer class="console-footer" v-if="preferences.showFooterHints">
             <span>{{ quickHotkey }}</span>
             <span>{{ regionHotkey }} (mirrors quick OCR)</span>
             <span>{{ lastUpdate }}</span>
           </footer>
         </div>
+
+        <section v-else class="settings-view no-drag">
+          <div class="settings-head">
+            <h2>Settings</h2>
+            <p>Tune overlay behavior and view preferences.</p>
+          </div>
+
+          <div class="settings-grid">
+            <label class="settings-item">
+              <span>Compact layout</span>
+              <input type="checkbox" v-model="preferences.compactLayout" />
+            </label>
+
+            <label class="settings-item">
+              <span>Show confidence meter</span>
+              <input type="checkbox" v-model="preferences.showConfidenceMeter" />
+            </label>
+
+            <label class="settings-item">
+              <span>Show footer hints</span>
+              <input type="checkbox" v-model="preferences.showFooterHints" />
+            </label>
+
+            <label class="settings-item">
+              <span>Animate result updates</span>
+              <input type="checkbox" v-model="preferences.animateTextUpdates" />
+            </label>
+          </div>
+
+          <div class="settings-shortcuts">
+            <div>
+              <span>Quick OCR</span>
+              <strong>{{ quickHotkey }}</strong>
+            </div>
+            <div>
+              <span>Region OCR</span>
+              <strong>{{ regionHotkey }}</strong>
+            </div>
+            <div>
+              <span>Open Settings</span>
+              <strong>Ctrl/Cmd + ,</strong>
+            </div>
+          </div>
+        </section>
       </section>
     </main>
   </div>
@@ -176,7 +290,7 @@ onUnmounted(() => {
 .overlay-bg {
   position: absolute;
   inset: 0;
-  background: rgba(129, 139, 149, 0.15);
+  background: radial-gradient(circle at 82% 8%, rgba(59, 130, 246, 0.15), rgba(2, 6, 23, 0.32) 38%, rgba(2, 6, 23, 0.62));
   pointer-events: none;
 }
 
@@ -195,6 +309,11 @@ onUnmounted(() => {
   gap: 8px;
   height: calc(100% - 47px);
   padding: 0.45rem;
+}
+
+.compact .console-body {
+  gap: 6px;
+  padding: 0.35rem;
 }
 
 .status-row {
@@ -276,6 +395,10 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.metrics-row.single {
+  grid-template-columns: 1fr;
+}
+
 .metric-chip {
   border: 1px solid rgba(55, 65, 81, 1);
   border-radius: 0.3rem;
@@ -335,6 +458,77 @@ onUnmounted(() => {
   color: rgba(148, 163, 184, 1);
 }
 
+.settings-view {
+  height: calc(100% - 47px);
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: rgba(229, 231, 235, 1);
+}
+
+.settings-head p {
+  margin: 0.2rem 0 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 1);
+}
+
+.settings-grid {
+  border: 1px solid rgba(55, 65, 81, 1);
+  border-radius: 0.35rem;
+  background: rgba(17, 24, 39, 0.88);
+  overflow: auto;
+}
+
+.settings-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
+  font-size: 0.72rem;
+  color: rgba(229, 231, 235, 1);
+}
+
+.settings-item:last-child {
+  border-bottom: none;
+}
+
+.settings-item input[type='checkbox'] {
+  accent-color: rgba(14, 165, 233, 1);
+}
+
+.settings-shortcuts {
+  border: 1px solid rgba(55, 65, 81, 1);
+  border-radius: 0.35rem;
+  background: rgba(15, 23, 42, 0.88);
+  padding: 0.55rem 0.6rem;
+  display: grid;
+  gap: 0.34rem;
+}
+
+.settings-shortcuts div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  font-size: 0.66rem;
+  color: rgba(148, 163, 184, 1);
+}
+
+.settings-shortcuts strong {
+  color: rgba(229, 231, 235, 1);
+  font-family: 'SFMono-Regular', Consolas, Monaco, monospace;
+  font-size: 0.64rem;
+}
+
 .no-drag {
   -webkit-app-region: no-drag;
 }
@@ -360,11 +554,12 @@ onUnmounted(() => {
 }
 
 .widget-default-style {
-  border-radius: 0.25rem;
-  background: rgba(17, 24, 39, 1);
+  border-radius: 0.3rem;
+  background: rgba(17, 24, 39, 0.95);
+  border: 1px solid rgba(51, 65, 85, 0.8);
   box-shadow:
-    0 1px 3px 0 rgba(0, 0, 0, 0.75),
-    0 1px 2px 0 rgba(0, 0, 0, 0.75);
+    0 6px 16px rgba(2, 6, 23, 0.6),
+    0 2px 6px rgba(2, 6, 23, 0.55);
 }
 
 .fade-swap-enter-active,
@@ -383,6 +578,10 @@ onUnmounted(() => {
 @media (max-width: 720px) {
   .metrics-row {
     grid-template-columns: 1fr;
+  }
+
+  .settings-view {
+    padding: 0.45rem;
   }
 }
 </style>

@@ -540,6 +540,16 @@ function startRegionSelection(): void {
 }
 
 function registerOverlayIpc(): void {
+  ipcMain.handle('overlay:hide-console', () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return false;
+    }
+
+    hideOverlay();
+    return true;
+  });
+
+  // Backward compatibility for older renderer bundles that still use send().
   ipcMain.on('overlay:hide-console', () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return;
@@ -854,6 +864,7 @@ app.on('will-quit', async () => {
   }
 
   globalShortcut.unregisterAll();
+  ipcMain.removeHandler('overlay:hide-console');
   ipcMain.removeAllListeners('overlay:hide-console');
   await disposeOcrWorkerThread();
 });

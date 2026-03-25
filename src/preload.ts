@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('overlayApi', {
   onMode: (callback: (payload: { mode: 'console' | 'selecting'; hotkeys?: { quick?: string; region?: string } }) => void): void => {
     ipcRenderer.on('overlay-mode', (_event, payload) => callback(payload));
   },
-  hideOverlay: (): void => {
-    ipcRenderer.send('overlay:hide-console');
+  hideOverlay: async (): Promise<boolean> => {
+    return ipcRenderer.invoke('overlay:hide-console');
   },
 });
