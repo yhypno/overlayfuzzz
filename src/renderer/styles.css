@@ -41,10 +41,6 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-body[data-mode='selecting'] {
-  cursor: crosshair;
-}
-
 ::selection {
   background: rgba(71, 232, 194, 0.28);
   color: #fff;
@@ -55,70 +51,6 @@ body[data-mode='selecting'] {
   width: 100%;
   height: 100%;
   isolation: isolate;
-}
-
-.selection-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  pointer-events: auto;
-  background: rgba(2, 8, 23, 0.3);
-  backdrop-filter: blur(1.2px);
-}
-
-.selection-layer.hidden {
-  display: none;
-}
-
-.selection-guide {
-  position: absolute;
-  top: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(92vw, 620px);
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  background: rgba(8, 16, 31, 0.64);
-  color: rgba(241, 245, 255, 0.94);
-  text-align: center;
-  font-size: 14px;
-  line-height: 1.55;
-  padding: 12px 16px;
-  letter-spacing: 0.01em;
-  box-shadow: 0 18px 50px rgba(2, 6, 23, 0.4);
-}
-
-.selection-guide__hint {
-  margin-top: 4px;
-  color: rgba(219, 226, 245, 0.86);
-  text-transform: uppercase;
-  letter-spacing: 0.24em;
-  font-size: 10px;
-}
-
-.selection-rect {
-  position: absolute;
-  border: 2px solid rgba(145, 247, 218, 0.95);
-  background: rgba(71, 232, 194, 0.12);
-  box-shadow: 0 0 0 9999px rgba(2, 6, 23, 0.28);
-}
-
-.selection-rect.hidden {
-  display: none;
-}
-
-.selection-rect__label {
-  position: absolute;
-  top: -30px;
-  left: 0;
-  padding: 4px 7px;
-  border-radius: 7px;
-  background: rgba(2, 8, 23, 0.88);
-  color: rgba(163, 248, 226, 0.96);
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 10px;
-  font-weight: 700;
 }
 
 .ambient {
@@ -160,10 +92,6 @@ body[data-mode='selecting'] {
   align-items: flex-start;
   justify-content: flex-end;
   padding: 24px;
-}
-
-body[data-mode='selecting'] .overlay {
-  display: none;
 }
 
 .panel {
