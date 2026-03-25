@@ -1,17 +1,39 @@
 <template>
   <div class="titlebar drag-region">
-    <button class="titlebar-main no-drag" @click="emit('click')">{{ title }}</button>
-    <button class="titlebar-close no-drag" @click.stop="emit('close')" tabindex="-1" title="Close">×</button>
+    <div class="titlebar-left">
+      <button class="titlebar-main no-drag" type="button" @click="emit('console')">{{ title }}</button>
+      <div class="titlebar-nav no-drag">
+        <button
+          class="titlebar-nav-btn"
+          :class="{ active: activePage === 'console' }"
+          type="button"
+          @click="emit('console')"
+        >
+          Console
+        </button>
+        <button
+          class="titlebar-nav-btn"
+          :class="{ active: activePage === 'settings' }"
+          type="button"
+          @click="emit('settings')"
+        >
+          Settings
+        </button>
+      </div>
+    </div>
+    <button class="titlebar-close no-drag" type="button" @click="emit('close')" title="Close">×</button>
   </div>
 </template>
 
 <script setup lang="ts">
 defineProps<{
   title?: string;
+  activePage?: 'console' | 'settings';
 }>();
 
 const emit = defineEmits<{
-  (e: 'click'): void;
+  (e: 'console'): void;
+  (e: 'settings'): void;
   (e: 'close'): void;
 }>();
 </script>
@@ -26,13 +48,34 @@ const emit = defineEmits<{
   height: 1.5rem;
   line-height: 1.5rem;
   border-bottom: 1px solid rgba(55, 65, 81, 1);
+  padding: 0 0.2rem;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.titlebar-nav {
+  display: flex;
+  gap: 0.22rem;
+}
+
+.titlebar-main,
+.titlebar-close,
+.titlebar-nav-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  height: 1.2rem;
+  line-height: 1.2rem;
+  border-radius: 0.22rem;
 }
 
 .titlebar-main,
 .titlebar-close {
-  border: none;
-  background: transparent;
-  color: inherit;
   padding: 0 0.5rem;
 }
 
@@ -40,6 +83,24 @@ const emit = defineEmits<{
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 0.66rem;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-nav-btn {
+  font-size: 0.56rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 0 0.42rem;
+  border: 1px solid transparent;
+}
+
+.titlebar-nav-btn.active {
+  color: rgba(229, 231, 235, 1);
+  border-color: rgba(75, 85, 99, 1);
+  background: rgba(31, 41, 55, 0.85);
 }
 
 .titlebar-close {
@@ -51,7 +112,8 @@ const emit = defineEmits<{
 }
 
 .titlebar-main:hover,
-.titlebar-close:hover {
+.titlebar-close:hover,
+.titlebar-nav-btn:hover {
   color: rgba(156, 163, 175, 1);
   background: linear-gradient(to top, rgba(17, 24, 39, 1), rgba(55, 65, 81, 1));
 }
