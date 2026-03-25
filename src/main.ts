@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   globalShortcut,
   ipcMain,
+  nativeImage,
   screen,
   type BrowserWindowConstructorOptions,
   type Display,
@@ -11,7 +12,6 @@ import { Worker } from 'node:worker_threads';
 import fs from 'node:fs';
 import path from 'node:path';
 import screenshot from 'screenshot-desktop';
-import Jimp from 'jimp';
 
 const HOTKEY_QUICK_CAPTURE = 'CommandOrControl+Shift+O';
 const HOTKEY_REGION_CAPTURE = 'CommandOrControl+Shift+R';
@@ -138,6 +138,7 @@ let isAppQuitting = false;
 let overlayMode: OverlayMode = OVERLAY_MODES.CONSOLE;
 let consoleWindowBounds: Electron.Rectangle | null = null;
 let captureSettings: CaptureSettings = cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
+let hideOverlayFromScreenshots = true;
 
 function safeRequire(moduleName: string): { module: any; error: Error | null } {
   try {
@@ -222,6 +223,7 @@ function getOverlayWindowOptions(): BrowserWindowConstructorOptions {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   };
 }
@@ -756,6 +758,18 @@ function setOverlayInteractivity(interactive: boolean): void {
   }
 }
 
+function applyOverlayScreenshotVisibility(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  try {
+    overlayWindow.setContentProtection(Boolean(hideOverlayFromScreenshots));
+  } catch {
+    // setContentProtection can be unsupported on some window managers.
+  }
+}
+
 function settleOcrRequest(requestId: number, error: Error | null, payload?: OcrResultPayload): void {
   const pending = ocrWorkerPending.get(requestId);
   if (!pending) return;
@@ -843,21 +857,24 @@ function ensureOcrWorkerThread(): Promise<Worker> {
   });
 }
 
-async function runWorkerOcr(imageBuffer: Buffer): Promise<OcrResultPayload> {
+async function runWorkerOcr(capture: CaptureResult): Promise<OcrResultPayload> {
   const thread = await ensureOcrWorkerThread();
   const requestId = ++ocrWorkerRequestSeq;
-  const bytes = Uint8Array.from(imageBuffer);
+  const bytes = new Uint8Array(capture.buffer.buffer, capture.buffer.byteOffset, capture.buffer.byteLength);
 
   return new Promise((resolve, reject) => {
     ocrWorkerPending.set(requestId, { resolve, reject: (error) => reject(error) });
     try {
       thread.postMessage(
         {
-          type: 'recognize',
+          type: 'crop-and-recognize',
           requestId,
           image: bytes,
+          crop: capture.crop,
+          displayWidth: capture.displayWidth,
+          displayHeight: capture.displayHeight,
         },
-        [bytes.buffer],
+        [bytes.buffer as ArrayBuffer],
       );
     } catch (error) {
       settleOcrRequest(requestId, error instanceof Error ? error : new Error(String(error)));
@@ -884,7 +901,14 @@ async function disposeOcrWorkerThread(): Promise<void> {
   }
 }
 
-async function captureAroundCursor(): Promise<Buffer> {
+interface CaptureResult {
+  buffer: Buffer;
+  crop: { x: number; y: number; width: number; height: number };
+  displayWidth: number;
+  displayHeight: number;
+}
+
+async function captureAroundCursor(): Promise<CaptureResult> {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
 
@@ -901,23 +925,54 @@ async function captureAroundCursor(): Promise<Buffer> {
     buffer = (await screenshot({ format: 'png' })) as Buffer;
   }
 
-  const image = await Jimp.read(buffer);
-  const scaleX = image.bitmap.width / Math.max(display.bounds.width, 1);
-  const scaleY = image.bitmap.height / Math.max(display.bounds.height, 1);
-
-  const left = Math.round((cursorX - captureWidth / 2) * scaleX);
-  const top = Math.round((cursorY - captureHeight / 2) * scaleY);
-
-  const cropX = Math.max(0, Math.min(image.bitmap.width - 1, left));
-  const cropY = Math.max(0, Math.min(image.bitmap.height - 1, top));
-  const cropW = Math.min(Math.max(1, Math.round(captureWidth * scaleX)), image.bitmap.width - cropX);
-  const cropH = Math.min(Math.max(1, Math.round(captureHeight * scaleY)), image.bitmap.height - cropY);
-
-  const cropped = image.clone().crop(cropX, cropY, cropW, cropH);
-  return cropped.getBufferAsync(Jimp.MIME_PNG);
+  return {
+    buffer,
+    crop: {
+      x: cursorX - captureWidth / 2,
+      y: cursorY - captureHeight / 2,
+      width: captureWidth,
+      height: captureHeight,
+    },
+    displayWidth: display.bounds.width,
+    displayHeight: display.bounds.height,
+  };
 }
 
-async function runCapturePipeline(captureFn: () => Promise<Buffer>, captureMessage: string): Promise<boolean> {
+function getLlmImageBuffer(capture: CaptureResult): Buffer {
+  const sourceImage = nativeImage.createFromBuffer(capture.buffer);
+  if (sourceImage.isEmpty()) {
+    return capture.buffer;
+  }
+
+  const sourceSize = sourceImage.getSize();
+  if (sourceSize.width <= 0 || sourceSize.height <= 0) {
+    return capture.buffer;
+  }
+
+  const scaleX = sourceSize.width / Math.max(capture.displayWidth, 1);
+  const scaleY = sourceSize.height / Math.max(capture.displayHeight, 1);
+  const left = Math.round(capture.crop.x * scaleX);
+  const top = Math.round(capture.crop.y * scaleY);
+  const cropX = Math.max(0, Math.min(sourceSize.width - 1, left));
+  const cropY = Math.max(0, Math.min(sourceSize.height - 1, top));
+  const cropW = Math.min(Math.max(1, Math.round(capture.crop.width * scaleX)), sourceSize.width - cropX);
+  const cropH = Math.min(Math.max(1, Math.round(capture.crop.height * scaleY)), sourceSize.height - cropY);
+
+  try {
+    return sourceImage
+      .crop({
+        x: cropX,
+        y: cropY,
+        width: cropW,
+        height: cropH,
+      })
+      .toPNG();
+  } catch {
+    return capture.buffer;
+  }
+}
+
+async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captureMessage: string): Promise<boolean> {
   if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
     return false;
   }
@@ -928,13 +983,14 @@ async function runCapturePipeline(captureFn: () => Promise<Buffer>, captureMessa
   try {
     const activeSettings = cloneCaptureSettings(captureSettings);
     const activeProvider = providerLabel(activeSettings.provider);
-    const imageBuffer = await captureFn();
+    const capture = await captureFn();
+    const imageBuffer = getLlmImageBuffer(capture);
     let ocrText = '';
     let ocrConfidence: number | null = null;
 
     if (activeSettings.useOcr) {
       overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
-      const bestResult = await runWorkerOcr(imageBuffer);
+      const bestResult = await runWorkerOcr(capture);
       ocrText = bestResult.text || '';
       ocrConfidence = bestResult.confidence ?? null;
     }
@@ -1005,15 +1061,7 @@ function toggleOverlayAndCapture(): void {
 }
 
 function startRegionSelection(): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-
-  if (overlayWindow.isVisible()) {
-    hideOverlay();
-    return;
-  }
-
-  showOverlayForCapture();
-  void runCapturePipeline(captureAroundCursor, 'Capturing screen...');
+  toggleOverlayAndCapture();
 }
 
 function registerOverlayIpc(): void {
@@ -1056,6 +1104,16 @@ function registerOverlayIpc(): void {
     }
 
     return cloneCaptureSettings(captureSettings);
+  });
+
+  ipcMain.handle('overlay:set-screenshot-exclusion', (_event, enabled: unknown) => {
+    hideOverlayFromScreenshots = Boolean(enabled);
+    applyOverlayScreenshotVisibility();
+    return hideOverlayFromScreenshots;
+  });
+
+  ipcMain.handle('overlay:get-screenshot-exclusion', () => {
+    return hideOverlayFromScreenshots;
   });
 }
 
@@ -1235,6 +1293,7 @@ function createOverlayWindow(): void {
   });
 
   setOverlayInteractivity(false);
+  applyOverlayScreenshotVisibility();
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.hide();
@@ -1353,7 +1412,7 @@ app.whenReady().then(() => {
   hotkeyManager.start();
 });
 
-app.on('will-quit', async () => {
+app.on('will-quit', () => {
   isAppQuitting = true;
 
   if (displaySyncCleanup) {
@@ -1370,8 +1429,19 @@ app.on('will-quit', async () => {
   ipcMain.removeHandler('overlay:hide-console');
   ipcMain.removeHandler('overlay:get-settings');
   ipcMain.removeHandler('overlay:update-settings');
+  ipcMain.removeHandler('overlay:set-screenshot-exclusion');
+  ipcMain.removeHandler('overlay:get-screenshot-exclusion');
   ipcMain.removeAllListeners('overlay:hide-console');
-  await disposeOcrWorkerThread();
+
+  // Fire-and-forget — Electron does not await async will-quit handlers.
+  if (ocrWorkerThread) {
+    const thread = ocrWorkerThread;
+    ocrWorkerThread = null;
+    thread.terminate().catch(() => {});
+    for (const requestId of ocrWorkerPending.keys()) {
+      settleOcrRequest(requestId, new Error('OCR worker terminated.'));
+    }
+  }
 });
 
 app.on('window-all-closed', () => {

@@ -5,18 +5,11 @@ interface OverlayResultPayload {
 }
 
 interface OverlayModePayload {
-  mode: 'console' | 'selecting';
+  mode: 'console';
   hotkeys?: {
     quick?: string;
     region?: string;
   };
-}
-
-interface OverlaySelectionRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
 }
 
 interface OverlayApi {
@@ -24,8 +17,6 @@ interface OverlayApi {
   onResult(callback: (payload: OverlayResultPayload) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
   hideOverlay(): void;
-  cancelSelection?(): void;
-  submitRegion?(rect: OverlaySelectionRect): Promise<{ ok: boolean; error?: string }>;
 }
 
 declare global {
@@ -43,30 +34,17 @@ const confidenceBarEl = document.getElementById('confidenceBar');
 const errorValueEl = document.getElementById('errorValue');
 const quickHotkeyEl = document.getElementById('quickHotkey');
 const regionHotkeyEl = document.getElementById('regionHotkey');
-const selectionLayerEl = document.getElementById('selectionLayer');
-const selectionRectEl = document.getElementById('selectionRect');
-const selectionRectLabelEl = document.getElementById('selectionRectLabel');
-
-const MIN_SELECTION_SIZE = 6;
 
 const uiState = {
-  status: 'Press Ctrl/Cmd + Shift + O for quick capture or Ctrl/Cmd + Shift + R to select a region.',
+  status: 'Press Ctrl/Cmd + Shift + O for quick capture.',
   result: 'Waiting for LLM output...',
   confidence: null as number | null,
   error: '',
   state: 'idle' as 'idle' | 'capturing' | 'processing' | 'done' | 'error',
-  mode: 'console' as 'console' | 'selecting',
   hotkeys: {
     quick: 'Ctrl/Cmd + Shift + O',
     region: 'Ctrl/Cmd + Shift + R',
   },
-};
-
-const selectionState = {
-  dragging: false,
-  submitting: false,
-  start: null as { x: number; y: number } | null,
-  current: null as { x: number; y: number } | null,
 };
 
 function clampConfidence(value: number | null | undefined): number {
@@ -95,54 +73,15 @@ function deriveState(status: string, payload?: OverlayResultPayload): 'idle' | '
   return 'idle';
 }
 
-function currentSelectionRect(): OverlaySelectionRect | null {
-  if (!selectionState.start || !selectionState.current) {
-    return null;
-  }
-
-  const left = Math.min(selectionState.start.x, selectionState.current.x);
-  const top = Math.min(selectionState.start.y, selectionState.current.y);
-  const width = Math.abs(selectionState.current.x - selectionState.start.x);
-  const height = Math.abs(selectionState.current.y - selectionState.start.y);
-
-  return { x: left, y: top, width, height };
-}
-
-function clearSelectionRect(): void {
-  selectionState.dragging = false;
-  selectionState.start = null;
-  selectionState.current = null;
-}
-
-function updateSelectionRectUI(): void {
-  if (!selectionRectEl || !selectionRectLabelEl) return;
-
-  const rect = currentSelectionRect();
-  if (!rect) {
-    selectionRectEl.classList.add('hidden');
-    return;
-  }
-
-  selectionRectEl.classList.remove('hidden');
-  (selectionRectEl as HTMLElement).style.left = `${rect.x}px`;
-  (selectionRectEl as HTMLElement).style.top = `${rect.y}px`;
-  (selectionRectEl as HTMLElement).style.width = `${rect.width}px`;
-  (selectionRectEl as HTMLElement).style.height = `${rect.height}px`;
-  selectionRectLabelEl.textContent = `${Math.round(rect.width)} x ${Math.round(rect.height)}`;
-}
-
 function syncUI(): void {
   document.body.dataset.state = uiState.state;
-  document.body.dataset.mode = uiState.mode;
   if (statusEl) statusEl.textContent = uiState.status;
   if (resultEl) resultEl.textContent = uiState.result;
   if (metaEl) {
     metaEl.textContent =
-      uiState.mode === 'selecting'
-        ? 'Selection mode active'
-        : uiState.state === 'error'
-          ? 'Bridge reported an error'
-          : 'Bridge ready';
+      uiState.state === 'error'
+        ? 'Bridge reported an error'
+        : 'Bridge ready';
   }
   if (statePillEl) {
     statePillEl.textContent =
@@ -178,12 +117,6 @@ function syncUI(): void {
   if (regionHotkeyEl) {
     regionHotkeyEl.textContent = `Region: ${uiState.hotkeys.region}`;
   }
-
-  if (selectionLayerEl) {
-    selectionLayerEl.classList.toggle('hidden', uiState.mode !== 'selecting');
-  }
-
-  updateSelectionRectUI();
 }
 
 function updateStatus(text: string): void {
@@ -208,8 +141,6 @@ function updateResult(payload: OverlayResultPayload): void {
 }
 
 function applyMode(payload: OverlayModePayload): void {
-  uiState.mode = payload?.mode === 'selecting' ? 'selecting' : 'console';
-
   const quick = prettifyHotkey(payload?.hotkeys?.quick);
   if (quick) {
     uiState.hotkeys.quick = quick;
@@ -220,156 +151,8 @@ function applyMode(payload: OverlayModePayload): void {
     uiState.hotkeys.region = region;
   }
 
-  if (uiState.mode === 'selecting') {
-    uiState.error = '';
-    uiState.confidence = null;
-    uiState.status = 'Draw a rectangle to capture. Press Esc to cancel.';
-    uiState.state = 'capturing';
-  } else {
-    selectionState.submitting = false;
-  }
-
-  clearSelectionRect();
   syncUI();
 }
-
-function selectionPointFromEvent(event: PointerEvent): { x: number; y: number } {
-  if (!selectionLayerEl) return { x: 0, y: 0 };
-  const bounds = selectionLayerEl.getBoundingClientRect();
-  return {
-    x: event.clientX - bounds.left,
-    y: event.clientY - bounds.top,
-  };
-}
-
-function cancelSelection(): void {
-  clearSelectionRect();
-  selectionState.submitting = false;
-  syncUI();
-
-  if (window.overlayApi?.cancelSelection) {
-    window.overlayApi.cancelSelection();
-  }
-}
-
-async function submitSelection(rect: OverlaySelectionRect): Promise<void> {
-  if (!window.overlayApi?.submitRegion) {
-    uiState.error = 'Bridge unavailable';
-    uiState.state = 'error';
-    syncUI();
-    return;
-  }
-
-  selectionState.submitting = true;
-  uiState.status = 'Capturing selected region...';
-  uiState.state = 'capturing';
-  syncUI();
-
-  try {
-    const response = await window.overlayApi.submitRegion(rect);
-    if (!response?.ok) {
-      uiState.error = response?.error || 'Failed to capture selected region.';
-      uiState.state = 'error';
-      syncUI();
-    }
-  } catch (error) {
-    uiState.error = error instanceof Error ? error.message : String(error);
-    uiState.state = 'error';
-    syncUI();
-  } finally {
-    selectionState.submitting = false;
-  }
-}
-
-function onSelectionPointerDown(event: PointerEvent): void {
-  if (
-    uiState.mode !== 'selecting' ||
-    selectionState.submitting ||
-    event.button !== 0 ||
-    !selectionLayerEl ||
-    !(event.target instanceof Node) ||
-    !selectionLayerEl.contains(event.target)
-  ) {
-    return;
-  }
-
-  event.preventDefault();
-  selectionState.dragging = true;
-  selectionState.start = selectionPointFromEvent(event);
-  selectionState.current = selectionPointFromEvent(event);
-  uiState.status = 'Drag to define the capture region.';
-
-  if (selectionLayerEl.setPointerCapture) {
-    selectionLayerEl.setPointerCapture(event.pointerId);
-  }
-
-  syncUI();
-}
-
-function onSelectionPointerMove(event: PointerEvent): void {
-  if (!selectionState.dragging || uiState.mode !== 'selecting' || selectionState.submitting) {
-    return;
-  }
-
-  selectionState.current = selectionPointFromEvent(event);
-  updateSelectionRectUI();
-}
-
-async function onSelectionPointerUp(event: PointerEvent): Promise<void> {
-  if (!selectionState.dragging || uiState.mode !== 'selecting' || selectionState.submitting) {
-    return;
-  }
-
-  if (selectionLayerEl?.releasePointerCapture && selectionLayerEl.hasPointerCapture(event.pointerId)) {
-    selectionLayerEl.releasePointerCapture(event.pointerId);
-  }
-
-  selectionState.current = selectionPointFromEvent(event);
-  const rect = currentSelectionRect();
-  clearSelectionRect();
-  syncUI();
-
-  if (!rect || rect.width < MIN_SELECTION_SIZE || rect.height < MIN_SELECTION_SIZE) {
-    uiState.status = 'Selection too small. Drag a larger rectangle.';
-    syncUI();
-    return;
-  }
-
-  await submitSelection(rect);
-}
-
-function onSelectionPointerCancel(event: PointerEvent): void {
-  if (selectionLayerEl?.releasePointerCapture && selectionLayerEl.hasPointerCapture(event.pointerId)) {
-    selectionLayerEl.releasePointerCapture(event.pointerId);
-  }
-
-  clearSelectionRect();
-  syncUI();
-}
-
-function onWindowKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || uiState.mode !== 'selecting') {
-    return;
-  }
-
-  event.preventDefault();
-  cancelSelection();
-}
-
-if (selectionLayerEl) {
-  selectionLayerEl.addEventListener('pointerdown', onSelectionPointerDown);
-  selectionLayerEl.addEventListener('pointermove', onSelectionPointerMove);
-  selectionLayerEl.addEventListener('pointerup', onSelectionPointerUp);
-  selectionLayerEl.addEventListener('pointercancel', onSelectionPointerCancel);
-  selectionLayerEl.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    if (uiState.mode === 'selecting') {
-      cancelSelection();
-    }
-  });
-}
-
-window.addEventListener('keydown', onWindowKeydown);
 
 if (window.overlayApi) {
   uiState.state = 'idle';

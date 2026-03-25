@@ -11,7 +11,7 @@
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "strict": false,
+    "strict": true,
     "sourceMap": true
   },
   "include": ["src/**/*.ts"]
