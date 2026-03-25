@@ -86,6 +86,7 @@ let overlayBridgeInitialized = false;
 let isAppQuitting = false;
 let overlayMode: OverlayMode = OVERLAY_MODES.CONSOLE;
 let consoleWindowBounds: Electron.Rectangle | null = null;
+let hideOverlayFromScreenshots = true;
 
 function safeRequire(moduleName: string): { module: any; error: Error | null } {
   try {
@@ -288,6 +289,18 @@ function setOverlayInteractivity(interactive: boolean): void {
     overlayWindow.focus();
   } else if (overlayWindow.isFocused()) {
     overlayWindow.blur();
+  }
+}
+
+function applyOverlayScreenshotVisibility(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  try {
+    overlayWindow.setContentProtection(Boolean(hideOverlayFromScreenshots));
+  } catch {
+    // setContentProtection can be unsupported on some window managers.
   }
 }
 
@@ -556,6 +569,16 @@ function registerOverlayIpc(): void {
 
     hideOverlay();
   });
+
+  ipcMain.handle('overlay:set-screenshot-exclusion', (_event, enabled: unknown) => {
+    hideOverlayFromScreenshots = Boolean(enabled);
+    applyOverlayScreenshotVisibility();
+    return hideOverlayFromScreenshots;
+  });
+
+  ipcMain.handle('overlay:get-screenshot-exclusion', () => {
+    return hideOverlayFromScreenshots;
+  });
 }
 
 function createHotkeyManager({
@@ -734,6 +757,7 @@ function createOverlayWindow(): void {
   });
 
   setOverlayInteractivity(false);
+  applyOverlayScreenshotVisibility();
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.hide();
@@ -864,6 +888,8 @@ app.on('will-quit', () => {
 
   globalShortcut.unregisterAll();
   ipcMain.removeHandler('overlay:hide-console');
+  ipcMain.removeHandler('overlay:set-screenshot-exclusion');
+  ipcMain.removeHandler('overlay:get-screenshot-exclusion');
   ipcMain.removeAllListeners('overlay:hide-console');
 
   // Fire-and-forget — Electron does not await async will-quit handlers.
