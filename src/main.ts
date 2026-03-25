@@ -30,6 +30,56 @@ const CONSOLE_MIN_SIZE = { width: 520, height: 360 };
 const CONSOLE_DEFAULT_SIZE = { width: 760, height: 540 };
 const CONSOLE_WINDOW_MARGIN = 28;
 const OCR_WORKER_ENTRY = path.join(__dirname, 'ocr-worker.js');
+const CAPTURE_SETTINGS_FILE = 'overlayfuzz-settings.json';
+const LLM_PROVIDERS = ['openrouter', 'ollama', 'openai', 'anthropic', 'gemini'] as const;
+
+type LlmProvider = (typeof LLM_PROVIDERS)[number];
+
+interface LlmProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+interface CaptureSettings {
+  useOcr: boolean;
+  provider: LlmProvider;
+  prompt: string;
+  providers: Record<LlmProvider, LlmProviderConfig>;
+}
+
+const DEFAULT_CAPTURE_SETTINGS: CaptureSettings = {
+  useOcr: false,
+  provider: 'openrouter',
+  prompt: 'Read this screenshot and return the important text in plain form. Keep line breaks where useful.',
+  providers: {
+    openrouter: {
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: (process.env.OPENROUTER_API_KEY || '').trim(),
+      model: 'openai/gpt-4o-mini',
+    },
+    ollama: {
+      baseUrl: 'http://127.0.0.1:11434',
+      apiKey: '',
+      model: 'llava:latest',
+    },
+    openai: {
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: (process.env.OPENAI_API_KEY || '').trim(),
+      model: 'gpt-4.1-mini',
+    },
+    anthropic: {
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: (process.env.ANTHROPIC_API_KEY || '').trim(),
+      model: 'claude-3-5-sonnet-latest',
+    },
+    gemini: {
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      apiKey: (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim(),
+      model: 'gemini-2.0-flash',
+    },
+  },
+};
 
 type OverlayMode = (typeof OVERLAY_MODES)[keyof typeof OVERLAY_MODES];
 
@@ -87,6 +137,7 @@ let overlayBridgeInitialized = false;
 let isAppQuitting = false;
 let overlayMode: OverlayMode = OVERLAY_MODES.CONSOLE;
 let consoleWindowBounds: Electron.Rectangle | null = null;
+let captureSettings: CaptureSettings = cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
 
 function safeRequire(moduleName: string): { module: any; error: Error | null } {
   try {
@@ -186,6 +237,420 @@ function clamp(value: number, min: number, max: number): number {
 
 function getDisplayWorkArea(display: Display | null): Electron.Rectangle | null {
   return display?.workArea || display?.bounds || null;
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+function normalizeString(value: unknown, fallback = ''): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  return value.trim();
+}
+
+function cloneCaptureSettings(settings: CaptureSettings): CaptureSettings {
+  return {
+    useOcr: Boolean(settings.useOcr),
+    provider: settings.provider,
+    prompt: settings.prompt,
+    providers: {
+      openrouter: { ...settings.providers.openrouter },
+      ollama: { ...settings.providers.ollama },
+      openai: { ...settings.providers.openai },
+      anthropic: { ...settings.providers.anthropic },
+      gemini: { ...settings.providers.gemini },
+    },
+  };
+}
+
+function normalizeProvider(value: unknown, fallback: LlmProvider): LlmProvider {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const lowered = value.trim().toLowerCase();
+  if ((LLM_PROVIDERS as readonly string[]).includes(lowered)) {
+    return lowered as LlmProvider;
+  }
+
+  return fallback;
+}
+
+function sanitizeProviderConfig(value: unknown, fallback: LlmProviderConfig): LlmProviderConfig {
+  const source = typeof value === 'object' && value ? (value as Partial<LlmProviderConfig>) : {};
+  return {
+    baseUrl: normalizeString(source.baseUrl, fallback.baseUrl),
+    apiKey: normalizeString(source.apiKey, fallback.apiKey),
+    model: normalizeString(source.model, fallback.model),
+  };
+}
+
+function sanitizeCaptureSettings(input: unknown, fallback: CaptureSettings = DEFAULT_CAPTURE_SETTINGS): CaptureSettings {
+  const defaults = cloneCaptureSettings(fallback);
+  const source = typeof input === 'object' && input ? (input as Partial<CaptureSettings>) : {};
+  const sourceProviders = typeof source.providers === 'object' && source.providers ? source.providers : {};
+
+  const prompt = normalizeString(source.prompt, defaults.prompt) || defaults.prompt;
+  const provider = normalizeProvider(source.provider, defaults.provider);
+
+  return {
+    useOcr: typeof source.useOcr === 'boolean' ? source.useOcr : defaults.useOcr,
+    provider,
+    prompt,
+    providers: {
+      openrouter: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).openrouter, defaults.providers.openrouter),
+      ollama: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).ollama, defaults.providers.ollama),
+      openai: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).openai, defaults.providers.openai),
+      anthropic: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).anthropic, defaults.providers.anthropic),
+      gemini: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).gemini, defaults.providers.gemini),
+    },
+  };
+}
+
+function getCaptureSettingsPath(): string {
+  return path.join(app.getPath('userData'), CAPTURE_SETTINGS_FILE);
+}
+
+function loadCaptureSettingsFromDisk(): CaptureSettings {
+  try {
+    const filePath = getCaptureSettingsPath();
+    if (!fs.existsSync(filePath)) {
+      return cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
+    }
+
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw.trim()) {
+      return cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
+    }
+
+    const parsed = JSON.parse(raw);
+    return sanitizeCaptureSettings(parsed, DEFAULT_CAPTURE_SETTINGS);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[overlayFuzz] Failed to load settings. Using defaults:', message);
+    return cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
+  }
+}
+
+function persistCaptureSettings(nextSettings: CaptureSettings): void {
+  try {
+    const filePath = getCaptureSettingsPath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(nextSettings, null, 2), 'utf8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[overlayFuzz] Failed to save settings:', message);
+  }
+}
+
+function extractTextFromContentBlock(content: unknown): string {
+  if (typeof content === 'string') {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    const fragments = content
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (!entry || typeof entry !== 'object') return '';
+
+        const maybeText = (entry as { text?: unknown }).text;
+        return typeof maybeText === 'string' ? maybeText : '';
+      })
+      .filter((entry) => entry.trim());
+    return fragments.join('\n').trim();
+  }
+
+  return '';
+}
+
+function extractHttpError(body: unknown, status: number): string {
+  if (body && typeof body === 'object') {
+    const objectBody = body as Record<string, any>;
+
+    if (typeof objectBody.error === 'string' && objectBody.error.trim()) {
+      return objectBody.error;
+    }
+
+    if (objectBody.error && typeof objectBody.error.message === 'string' && objectBody.error.message.trim()) {
+      return objectBody.error.message;
+    }
+
+    if (typeof objectBody.message === 'string' && objectBody.message.trim()) {
+      return objectBody.message;
+    }
+  }
+
+  return `HTTP ${status}`;
+}
+
+async function postJson(url: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Promise<any> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const raw = await response.text();
+  let parsed: any = null;
+
+  if (raw.trim()) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = { message: raw };
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(extractHttpError(parsed, response.status));
+  }
+
+  return parsed;
+}
+
+function buildPrompt(prompt: string, ocrHint: string): string {
+  const basePrompt = prompt.trim() || DEFAULT_CAPTURE_SETTINGS.prompt;
+  const normalizedHint = ocrHint.trim();
+
+  if (!normalizedHint) {
+    return basePrompt;
+  }
+
+  return `${basePrompt}\n\nOCR hint (may include mistakes):\n${normalizedHint}`;
+}
+
+function ensureApiKey(provider: LlmProvider, apiKey: string): void {
+  if (provider === 'ollama') {
+    return;
+  }
+
+  if (!apiKey.trim()) {
+    throw new Error(`Missing API key for ${provider}. Update it in Settings.`);
+  }
+}
+
+function providerLabel(provider: LlmProvider): string {
+  switch (provider) {
+    case 'openrouter':
+      return 'OpenRouter';
+    case 'ollama':
+      return 'Ollama';
+    case 'openai':
+      return 'OpenAI';
+    case 'anthropic':
+      return 'Anthropic';
+    case 'gemini':
+      return 'Gemini';
+    default:
+      return provider;
+  }
+}
+
+async function requestOpenAiCompatible(
+  provider: LlmProvider,
+  config: LlmProviderConfig,
+  prompt: string,
+  imageBase64: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<string> {
+  ensureApiKey(provider, config.apiKey);
+  if (!config.model.trim()) {
+    throw new Error(`Missing model for ${provider}. Update it in Settings.`);
+  }
+  if (!config.baseUrl.trim()) {
+    throw new Error(`Missing base URL for ${provider}. Update it in Settings.`);
+  }
+
+  const endpoint = `${stripTrailingSlash(config.baseUrl)}/chat/completions`;
+  const payload = await postJson(
+    endpoint,
+    {
+      model: config.model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: prompt,
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/png;base64,${imageBase64}`,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      Authorization: `Bearer ${config.apiKey}`,
+      ...extraHeaders,
+    },
+  );
+
+  const firstChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  const messageContent = firstChoice?.message?.content;
+  const text = extractTextFromContentBlock(messageContent);
+
+  if (!text) {
+    throw new Error(`${providerLabel(provider)} returned an empty response.`);
+  }
+
+  return text;
+}
+
+async function requestOllama(config: LlmProviderConfig, prompt: string, imageBase64: string): Promise<string> {
+  if (!config.model.trim()) {
+    throw new Error('Missing model for ollama. Update it in Settings.');
+  }
+  if (!config.baseUrl.trim()) {
+    throw new Error('Missing base URL for ollama. Update it in Settings.');
+  }
+
+  const endpoint = `${stripTrailingSlash(config.baseUrl)}/api/chat`;
+  const payload = await postJson(endpoint, {
+    model: config.model,
+    stream: false,
+    messages: [
+      {
+        role: 'user',
+        content: prompt,
+        images: [imageBase64],
+      },
+    ],
+  });
+
+  const text = extractTextFromContentBlock(payload?.message?.content);
+  if (!text) {
+    throw new Error('Ollama returned an empty response.');
+  }
+
+  return text;
+}
+
+async function requestAnthropic(config: LlmProviderConfig, prompt: string, imageBase64: string): Promise<string> {
+  ensureApiKey('anthropic', config.apiKey);
+  if (!config.model.trim()) {
+    throw new Error('Missing model for anthropic. Update it in Settings.');
+  }
+  if (!config.baseUrl.trim()) {
+    throw new Error('Missing base URL for anthropic. Update it in Settings.');
+  }
+
+  const endpoint = `${stripTrailingSlash(config.baseUrl)}/v1/messages`;
+  const payload = await postJson(
+    endpoint,
+    {
+      model: config.model,
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: imageBase64,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      'x-api-key': config.apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+  );
+
+  const text = extractTextFromContentBlock(payload?.content);
+  if (!text) {
+    throw new Error('Anthropic returned an empty response.');
+  }
+
+  return text;
+}
+
+async function requestGemini(config: LlmProviderConfig, prompt: string, imageBase64: string): Promise<string> {
+  ensureApiKey('gemini', config.apiKey);
+  if (!config.model.trim()) {
+    throw new Error('Missing model for gemini. Update it in Settings.');
+  }
+  if (!config.baseUrl.trim()) {
+    throw new Error('Missing base URL for gemini. Update it in Settings.');
+  }
+
+  const endpoint = `${stripTrailingSlash(config.baseUrl)}/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
+  const payload = await postJson(endpoint, {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: 'image/png',
+              data: imageBase64,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  const firstCandidate = candidates[0];
+  const parts = Array.isArray(firstCandidate?.content?.parts) ? firstCandidate.content.parts : [];
+  const text = parts
+    .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+    .filter((part: string) => part.trim())
+    .join('\n')
+    .trim();
+
+  if (!text) {
+    throw new Error('Gemini returned an empty response.');
+  }
+
+  return text;
+}
+
+async function runLlmCapture(imageBuffer: Buffer, activeSettings: CaptureSettings, ocrHint: string): Promise<string> {
+  const provider = activeSettings.provider;
+  const providerConfig = activeSettings.providers[provider];
+  const prompt = buildPrompt(activeSettings.prompt, ocrHint);
+  const imageBase64 = imageBuffer.toString('base64');
+
+  if (provider === 'openrouter') {
+    return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64, {
+      'HTTP-Referer': 'https://overlayfuzz.local',
+      'X-Title': 'overlayFuzz',
+    });
+  }
+
+  if (provider === 'openai') {
+    return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64);
+  }
+
+  if (provider === 'ollama') {
+    return requestOllama(providerConfig, prompt, imageBase64);
+  }
+
+  if (provider === 'anthropic') {
+    return requestAnthropic(providerConfig, prompt, imageBase64);
+  }
+
+  return requestGemini(providerConfig, prompt, imageBase64);
 }
 
 function getConsoleBoundsForDisplay(
@@ -452,7 +917,7 @@ async function captureAroundCursor(): Promise<Buffer> {
   return cropped.getBufferAsync(Jimp.MIME_PNG);
 }
 
-async function runOcrCapture(captureFn: () => Promise<Buffer>, captureMessage: string): Promise<boolean> {
+async function runCapturePipeline(captureFn: () => Promise<Buffer>, captureMessage: string): Promise<boolean> {
   if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
     return false;
   }
@@ -461,15 +926,27 @@ async function runOcrCapture(captureFn: () => Promise<Buffer>, captureMessage: s
   overlayWindow.webContents.send('ocr-status', captureMessage);
 
   try {
+    const activeSettings = cloneCaptureSettings(captureSettings);
+    const activeProvider = providerLabel(activeSettings.provider);
     const imageBuffer = await captureFn();
-    overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
-    const bestResult = await runWorkerOcr(imageBuffer);
+    let ocrText = '';
+    let ocrConfidence: number | null = null;
+
+    if (activeSettings.useOcr) {
+      overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
+      const bestResult = await runWorkerOcr(imageBuffer);
+      ocrText = bestResult.text || '';
+      ocrConfidence = bestResult.confidence ?? null;
+    }
+
+    overlayWindow.webContents.send('ocr-status', `Sending screenshot to ${activeProvider}...`);
+    const llmText = await runLlmCapture(imageBuffer, activeSettings, ocrText);
 
     overlayWindow.webContents.send('ocr-result', {
-      text: bestResult.text,
-      confidence: bestResult.confidence,
+      text: llmText,
+      confidence: ocrConfidence,
     });
-    overlayWindow.webContents.send('ocr-status', 'Done');
+    overlayWindow.webContents.send('ocr-status', `Done (${activeProvider})`);
     return true;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -478,7 +955,7 @@ async function runOcrCapture(captureFn: () => Promise<Buffer>, captureMessage: s
       confidence: null,
       error: errorMessage,
     });
-    overlayWindow.webContents.send('ocr-status', 'Error during OCR');
+    overlayWindow.webContents.send('ocr-status', 'Error during capture');
     return false;
   } finally {
     isCapturing = false;
@@ -524,7 +1001,7 @@ function toggleOverlayAndCapture(): void {
   }
 
   showOverlayForCapture();
-  void runOcrCapture(captureAroundCursor, 'Capturing screen...');
+  void runCapturePipeline(captureAroundCursor, 'Capturing screen...');
 }
 
 function startRegionSelection(): void {
@@ -536,7 +1013,7 @@ function startRegionSelection(): void {
   }
 
   showOverlayForCapture();
-  void runOcrCapture(captureAroundCursor, 'Capturing screen...');
+  void runCapturePipeline(captureAroundCursor, 'Capturing screen...');
 }
 
 function registerOverlayIpc(): void {
@@ -556,6 +1033,29 @@ function registerOverlayIpc(): void {
     }
 
     hideOverlay();
+  });
+
+  ipcMain.handle('overlay:get-settings', () => {
+    return cloneCaptureSettings(captureSettings);
+  });
+
+  ipcMain.handle('overlay:update-settings', (_event, nextSettings: unknown) => {
+    const previous = captureSettings;
+    captureSettings = sanitizeCaptureSettings(nextSettings, captureSettings);
+    persistCaptureSettings(captureSettings);
+
+    if (!previous.useOcr && captureSettings.useOcr) {
+      ensureOcrWorkerThread().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn('[overlayFuzz] OCR worker warm-up failed after enabling OCR:', message);
+      });
+    }
+
+    if (previous.useOcr && !captureSettings.useOcr) {
+      void disposeOcrWorkerThread();
+    }
+
+    return cloneCaptureSettings(captureSettings);
   });
 }
 
@@ -836,10 +1336,13 @@ function installDisplaySync(): () => void {
 }
 
 app.whenReady().then(() => {
-  ensureOcrWorkerThread().catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn('[overlayFuzz] OCR worker warm-up failed:', message);
-  });
+  captureSettings = loadCaptureSettingsFromDisk();
+  if (captureSettings.useOcr) {
+    ensureOcrWorkerThread().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[overlayFuzz] OCR worker warm-up failed:', message);
+    });
+  }
   registerOverlayIpc();
   createOverlayWindow();
   displaySyncCleanup = installDisplaySync();
@@ -865,6 +1368,8 @@ app.on('will-quit', async () => {
 
   globalShortcut.unregisterAll();
   ipcMain.removeHandler('overlay:hide-console');
+  ipcMain.removeHandler('overlay:get-settings');
+  ipcMain.removeHandler('overlay:update-settings');
   ipcMain.removeAllListeners('overlay:hide-console');
   await disposeOcrWorkerThread();
 });

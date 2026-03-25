@@ -50,8 +50,8 @@ const selectionRectLabelEl = document.getElementById('selectionRectLabel');
 const MIN_SELECTION_SIZE = 6;
 
 const uiState = {
-  status: 'Press Ctrl/Cmd + Shift + O for quick OCR or Ctrl/Cmd + Shift + R to select a region.',
-  result: 'Waiting for OCR...',
+  status: 'Press Ctrl/Cmd + Shift + O for quick capture or Ctrl/Cmd + Shift + R to select a region.',
+  result: 'Waiting for LLM output...',
   confidence: null as number | null,
   error: '',
   state: 'idle' as 'idle' | 'capturing' | 'processing' | 'done' | 'error',
@@ -223,7 +223,7 @@ function applyMode(payload: OverlayModePayload): void {
   if (uiState.mode === 'selecting') {
     uiState.error = '';
     uiState.confidence = null;
-    uiState.status = 'Draw a rectangle to OCR. Press Esc to cancel.';
+    uiState.status = 'Draw a rectangle to capture. Press Esc to cancel.';
     uiState.state = 'capturing';
   } else {
     selectionState.submitting = false;
@@ -297,7 +297,7 @@ function onSelectionPointerDown(event: PointerEvent): void {
   selectionState.dragging = true;
   selectionState.start = selectionPointFromEvent(event);
   selectionState.current = selectionPointFromEvent(event);
-  uiState.status = 'Drag to define the OCR region.';
+  uiState.status = 'Drag to define the capture region.';
 
   if (selectionLayerEl.setPointerCapture) {
     selectionLayerEl.setPointerCapture(event.pointerId);

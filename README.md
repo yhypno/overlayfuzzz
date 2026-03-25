@@ -3,9 +3,12 @@
 Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's approach (overlay window + OCR + global input hooks).
 
 ## What it does
-- Press `Ctrl/Cmd + Shift + O` to show a transparent overlay and OCR around your cursor.
-- Press `Ctrl/Cmd + Shift + R` to trigger the secondary capture hotkey. Right now it mirrors the quick OCR flow rather than opening a drag-to-select region tool.
-- Overlay UI shows OCR text, confidence, status, and error state.
+- Press `Ctrl/Cmd + Shift + O` to show a transparent overlay and capture around your cursor.
+- Press `Ctrl/Cmd + Shift + R` to trigger the secondary capture hotkey. Right now it mirrors the quick capture flow rather than opening a drag-to-select region tool.
+- Default pipeline is screenshot -> LLM.
+- OCR is optional and can be enabled from Settings to augment prompts before the LLM call.
+- Supported LLM providers: OpenRouter, Ollama, OpenAI, Anthropic, Gemini.
+- Overlay UI shows LLM output, OCR confidence (when OCR is enabled), status, and error state.
 - Press the active hotkey again to hide the overlay.
 - Press `Esc` while the overlay is focused to hide it, or `Ctrl/Cmd + ,` to open the overlay settings page.
 
@@ -23,7 +26,7 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 1. Install dependencies:
    - `bun install`
    - or `npm install`
-2. Provide OCR runtime files before launching OCR:
+2. (Optional) Provide OCR runtime files if you want OCR enabled in Settings:
    - Preferred: place `tesseract-core-simd.js` (or another supported tesseract core build) and `eng.traineddata` in `./cv-ocr/`
    - Or set:
      - `OVERLAY_FUZZ_TESS_CORE_PATH=/absolute/path/to/tesseract-core-simd.js`
@@ -48,6 +51,7 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 
 ## Notes
 - `uiohook-napi` and `electron-overlay-window` are optional dependencies, so installs can still succeed if native builds are unavailable.
+- LLM provider settings (provider, model, base URL, API key, OCR toggle, prompt) are configured from the in-window Settings screen and stored under Electron's user data folder (`overlayfuzz-settings.json`).
 - Overlay attachment by target window is opt-in. To enable it, set both:
   - `OVERLAY_FUZZ_ATTACH_TO_TARGET=1`
   - `OVERLAY_FUZZ_TARGET_WINDOW_TITLE="<target window title>"`
