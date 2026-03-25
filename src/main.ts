@@ -11,7 +11,6 @@ import { Worker } from 'node:worker_threads';
 import fs from 'node:fs';
 import path from 'node:path';
 import screenshot from 'screenshot-desktop';
-import Jimp from 'jimp';
 
 const HOTKEY_QUICK_CAPTURE = 'CommandOrControl+Shift+O';
 const HOTKEY_REGION_CAPTURE = 'CommandOrControl+Shift+R';
@@ -171,6 +170,7 @@ function getOverlayWindowOptions(): BrowserWindowConstructorOptions {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   };
 }
@@ -378,21 +378,24 @@ function ensureOcrWorkerThread(): Promise<Worker> {
   });
 }
 
-async function runWorkerOcr(imageBuffer: Buffer): Promise<OcrResultPayload> {
+async function runWorkerOcr(capture: CaptureResult): Promise<OcrResultPayload> {
   const thread = await ensureOcrWorkerThread();
   const requestId = ++ocrWorkerRequestSeq;
-  const bytes = Uint8Array.from(imageBuffer);
+  const bytes = new Uint8Array(capture.buffer.buffer, capture.buffer.byteOffset, capture.buffer.byteLength);
 
   return new Promise((resolve, reject) => {
     ocrWorkerPending.set(requestId, { resolve, reject: (error) => reject(error) });
     try {
       thread.postMessage(
         {
-          type: 'recognize',
+          type: 'crop-and-recognize',
           requestId,
           image: bytes,
+          crop: capture.crop,
+          displayWidth: capture.displayWidth,
+          displayHeight: capture.displayHeight,
         },
-        [bytes.buffer],
+        [bytes.buffer as ArrayBuffer],
       );
     } catch (error) {
       settleOcrRequest(requestId, error instanceof Error ? error : new Error(String(error)));
@@ -419,7 +422,14 @@ async function disposeOcrWorkerThread(): Promise<void> {
   }
 }
 
-async function captureAroundCursor(): Promise<Buffer> {
+interface CaptureResult {
+  buffer: Buffer;
+  crop: { x: number; y: number; width: number; height: number };
+  displayWidth: number;
+  displayHeight: number;
+}
+
+async function captureAroundCursor(): Promise<CaptureResult> {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
 
@@ -436,23 +446,20 @@ async function captureAroundCursor(): Promise<Buffer> {
     buffer = (await screenshot({ format: 'png' })) as Buffer;
   }
 
-  const image = await Jimp.read(buffer);
-  const scaleX = image.bitmap.width / Math.max(display.bounds.width, 1);
-  const scaleY = image.bitmap.height / Math.max(display.bounds.height, 1);
-
-  const left = Math.round((cursorX - captureWidth / 2) * scaleX);
-  const top = Math.round((cursorY - captureHeight / 2) * scaleY);
-
-  const cropX = Math.max(0, Math.min(image.bitmap.width - 1, left));
-  const cropY = Math.max(0, Math.min(image.bitmap.height - 1, top));
-  const cropW = Math.min(Math.max(1, Math.round(captureWidth * scaleX)), image.bitmap.width - cropX);
-  const cropH = Math.min(Math.max(1, Math.round(captureHeight * scaleY)), image.bitmap.height - cropY);
-
-  const cropped = image.clone().crop(cropX, cropY, cropW, cropH);
-  return cropped.getBufferAsync(Jimp.MIME_PNG);
+  return {
+    buffer,
+    crop: {
+      x: cursorX - captureWidth / 2,
+      y: cursorY - captureHeight / 2,
+      width: captureWidth,
+      height: captureHeight,
+    },
+    displayWidth: display.bounds.width,
+    displayHeight: display.bounds.height,
+  };
 }
 
-async function runOcrCapture(captureFn: () => Promise<Buffer>, captureMessage: string): Promise<boolean> {
+async function runOcrCapture(captureFn: () => Promise<CaptureResult>, captureMessage: string): Promise<boolean> {
   if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
     return false;
   }
@@ -461,9 +468,9 @@ async function runOcrCapture(captureFn: () => Promise<Buffer>, captureMessage: s
   overlayWindow.webContents.send('ocr-status', captureMessage);
 
   try {
-    const imageBuffer = await captureFn();
+    const capture = await captureFn();
     overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
-    const bestResult = await runWorkerOcr(imageBuffer);
+    const bestResult = await runWorkerOcr(capture);
 
     overlayWindow.webContents.send('ocr-result', {
       text: bestResult.text,
@@ -528,15 +535,7 @@ function toggleOverlayAndCapture(): void {
 }
 
 function startRegionSelection(): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-
-  if (overlayWindow.isVisible()) {
-    hideOverlay();
-    return;
-  }
-
-  showOverlayForCapture();
-  void runOcrCapture(captureAroundCursor, 'Capturing screen...');
+  toggleOverlayAndCapture();
 }
 
 function registerOverlayIpc(): void {
@@ -850,7 +849,7 @@ app.whenReady().then(() => {
   hotkeyManager.start();
 });
 
-app.on('will-quit', async () => {
+app.on('will-quit', () => {
   isAppQuitting = true;
 
   if (displaySyncCleanup) {
@@ -866,7 +865,16 @@ app.on('will-quit', async () => {
   globalShortcut.unregisterAll();
   ipcMain.removeHandler('overlay:hide-console');
   ipcMain.removeAllListeners('overlay:hide-console');
-  await disposeOcrWorkerThread();
+
+  // Fire-and-forget — Electron does not await async will-quit handlers.
+  if (ocrWorkerThread) {
+    const thread = ocrWorkerThread;
+    ocrWorkerThread = null;
+    thread.terminate().catch(() => {});
+    for (const requestId of ocrWorkerPending.keys()) {
+      settleOcrRequest(requestId, new Error('OCR worker terminated.'));
+    }
+  }
 });
 
 app.on('window-all-closed', () => {

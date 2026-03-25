@@ -3,20 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
     <title>OverlayFuzz</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body data-state="idle">
     <div class="scene">
-      <section class="selection-layer hidden" id="selectionLayer">
-        <div class="selection-guide">
-          <div>Drag to draw an OCR rectangle, then release to capture.</div>
-          <div class="selection-guide__hint">Press Esc or right-click to cancel</div>
-        </div>
-        <div class="selection-rect hidden" id="selectionRect">
-          <div class="selection-rect__label" id="selectionRectLabel">0 x 0</div>
-        </div>
-      </section>
       <div class="ambient ambient-a"></div>
       <div class="ambient ambient-b"></div>
       <div class="ambient ambient-c"></div>

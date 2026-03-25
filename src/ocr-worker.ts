@@ -231,13 +231,37 @@ async function recognizeImage(requestId: number, imageBytes: Uint8Array): Promis
     ocrSetImage(toRgbaBytes(pass.bitmap), pass.bitmap.width, pass.bitmap.height, 4);
     tessApi.Recognize();
 
+    const conf = tessApi.MeanTextConf();
     candidates.push({
       text: normalizeRecognizedText(tessApi.GetUTF8Text()),
-      confidence: Number.isFinite(tessApi.MeanTextConf()) ? Number(tessApi.MeanTextConf()) : null,
+      confidence: Number.isFinite(conf) ? Number(conf) : null,
     });
   }
 
   return selectBestCandidate(candidates);
+}
+
+async function cropScreenshot(
+  imageBytes: Uint8Array,
+  crop: { x: number; y: number; width: number; height: number },
+  displayWidth: number,
+  displayHeight: number,
+): Promise<Uint8Array> {
+  const image = await Jimp.read(Buffer.from(imageBytes));
+  const scaleX = image.bitmap.width / Math.max(displayWidth, 1);
+  const scaleY = image.bitmap.height / Math.max(displayHeight, 1);
+
+  const left = Math.round(crop.x * scaleX);
+  const top = Math.round(crop.y * scaleY);
+
+  const cropX = Math.max(0, Math.min(image.bitmap.width - 1, left));
+  const cropY = Math.max(0, Math.min(image.bitmap.height - 1, top));
+  const cropW = Math.min(Math.max(1, Math.round(crop.width * scaleX)), image.bitmap.width - cropX);
+  const cropH = Math.min(Math.max(1, Math.round(crop.height * scaleY)), image.bitmap.height - cropY);
+
+  const cropped = image.clone().crop(cropX, cropY, cropW, cropH);
+  const pngBuffer = await cropped.getBufferAsync(Jimp.MIME_PNG);
+  return new Uint8Array(pngBuffer.buffer, pngBuffer.byteOffset, pngBuffer.byteLength);
 }
 
 async function shutdown(): Promise<void> {
@@ -257,6 +281,31 @@ async function shutdown(): Promise<void> {
 if (parentPort) {
   parentPort.on('message', async (message: any) => {
     if (!message || typeof message !== 'object') {
+      return;
+    }
+
+    if (message.type === 'crop-and-recognize') {
+      try {
+        const cropped = await cropScreenshot(
+          message.image,
+          message.crop,
+          message.displayWidth,
+          message.displayHeight,
+        );
+        const result = await recognizeImage(message.requestId, cropped);
+        postMessageSafe({
+          type: 'result',
+          requestId: message.requestId,
+          text: result.text,
+          confidence: result.confidence,
+        });
+      } catch (error) {
+        postMessageSafe({
+          type: 'error',
+          requestId: message.requestId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return;
     }
 
