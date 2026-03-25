@@ -11,6 +11,7 @@ interface UiPreferences {
   showConfidenceMeter: boolean;
   showFooterHints: boolean;
   animateTextUpdates: boolean;
+  hideFromScreenshots: boolean;
 }
 
 const SETTINGS_STORAGE_KEY = 'overlayfuzz-ui-settings';
@@ -30,6 +31,7 @@ const preferences = ref<UiPreferences>({
   showConfidenceMeter: true,
   showFooterHints: true,
   animateTextUpdates: true,
+  hideFromScreenshots: true,
 });
 
 const stage = computed<Stage>(() => {
@@ -120,9 +122,22 @@ function loadPreferences() {
       showConfidenceMeter: parsed.showConfidenceMeter !== false,
       showFooterHints: parsed.showFooterHints !== false,
       animateTextUpdates: parsed.animateTextUpdates !== false,
+      hideFromScreenshots: parsed.hideFromScreenshots !== false,
     };
   } catch {
     // Ignore malformed local settings and keep defaults.
+  }
+}
+
+async function syncScreenshotExclusion(enabled: boolean) {
+  if (!window.overlayApi?.setScreenshotExclusion) {
+    return;
+  }
+
+  try {
+    await window.overlayApi.setScreenshotExclusion(enabled);
+  } catch {
+    // Ignore bridge errors so settings UI remains responsive.
   }
 }
 
@@ -132,6 +147,14 @@ watch(
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
   },
   { deep: true },
+);
+
+watch(
+  () => preferences.value.hideFromScreenshots,
+  (enabled) => {
+    void syncScreenshotExclusion(enabled);
+  },
+  { immediate: true },
 );
 
 async function hideConsole() {
@@ -263,6 +286,11 @@ onUnmounted(() => {
             <label class="settings-item">
               <span>Animate result updates</span>
               <input type="checkbox" v-model="preferences.animateTextUpdates" />
+            </label>
+
+            <label class="settings-item">
+              <span>Hide overlay in screenshots</span>
+              <input type="checkbox" v-model="preferences.hideFromScreenshots" />
             </label>
           </div>
 

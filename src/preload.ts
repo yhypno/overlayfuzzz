@@ -13,4 +13,10 @@ contextBridge.exposeInMainWorld('overlayApi', {
   hideOverlay: async (): Promise<boolean> => {
     return ipcRenderer.invoke('overlay:hide-console');
   },
+  setScreenshotExclusion: async (enabled: boolean): Promise<boolean> => {
+    return ipcRenderer.invoke('overlay:set-screenshot-exclusion', enabled);
+  },
+  getScreenshotExclusion: async (): Promise<boolean> => {
+    return ipcRenderer.invoke('overlay:get-screenshot-exclusion');
+  },
 });

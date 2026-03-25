@@ -8,6 +8,7 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 - Overlay UI shows OCR text, confidence, status, and error state.
 - Press the active hotkey again to hide the overlay.
 - Press `Esc` while the overlay is focused to hide it, or `Ctrl/Cmd + ,` to open the overlay settings page.
+- Settings now include `Hide overlay in screenshots`, which toggles whether the overlay window is excluded from OS/app screenshots.
 
 ## Stack
 - Electron main process (`src/main.ts`) orchestrates capture, OCR, and global input hooks.

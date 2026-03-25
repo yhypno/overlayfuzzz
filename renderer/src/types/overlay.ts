@@ -29,4 +29,6 @@ export interface OverlayApi {
   onResult(callback: (payload: OverlayResult) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
   hideOverlay(): Promise<boolean>;
+  setScreenshotExclusion(enabled: boolean): Promise<boolean>;
+  getScreenshotExclusion(): Promise<boolean>;
 }
