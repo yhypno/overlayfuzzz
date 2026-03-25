@@ -4,6 +4,21 @@ export interface OverlayResult {
   error?: string;
 }
 
+export type LlmProvider = 'openrouter' | 'ollama' | 'openai' | 'anthropic' | 'gemini';
+
+export interface LlmProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface CaptureSettings {
+  useOcr: boolean;
+  provider: LlmProvider;
+  prompt: string;
+  providers: Record<LlmProvider, LlmProviderConfig>;
+}
+
 export interface OverlayRegion {
   x: number;
   y: number;
@@ -29,6 +44,8 @@ export interface OverlayApi {
   onResult(callback: (payload: OverlayResult) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
   hideOverlay(): Promise<boolean>;
+  getSettings(): Promise<CaptureSettings>;
+  updateSettings(settings: CaptureSettings): Promise<CaptureSettings>;
   setScreenshotExclusion(enabled: boolean): Promise<boolean>;
   getScreenshotExclusion(): Promise<boolean>;
 }

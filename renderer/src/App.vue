@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppTitlebar from './components/AppTitlebar.vue';
-import type { OverlayModePayload, OverlayResult } from './types/overlay';
+import type { CaptureSettings, LlmProvider, OverlayModePayload, OverlayResult } from './types/overlay';
 
 type Stage = 'idle' | 'capturing' | 'processing' | 'done' | 'error';
 type Page = 'console' | 'settings';
@@ -15,9 +15,16 @@ interface UiPreferences {
 }
 
 const SETTINGS_STORAGE_KEY = 'overlayfuzz-ui-settings';
+const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'ollama', label: 'Ollama' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'gemini', label: 'Gemini' },
+];
 
-const status = ref('Press Ctrl/Cmd + Shift + O for quick OCR. Ctrl/Cmd + Shift + R mirrors quick OCR.');
-const result = ref('Waiting for OCR...');
+const status = ref('Press Ctrl/Cmd + Shift + O for quick capture. Ctrl/Cmd + Shift + R mirrors quick capture.');
+const result = ref('Waiting for LLM output...');
 const confidence = ref<number | null>(null);
 const error = ref('');
 const bridgeReady = ref(false);
@@ -25,6 +32,9 @@ const lastUpdate = ref('Idle');
 const quickHotkey = ref('Ctrl/Cmd + Shift + O');
 const regionHotkey = ref('Ctrl/Cmd + Shift + R');
 const activePage = ref<Page>('console');
+const settingsError = ref('');
+const settingsNotice = ref('');
+const settingsSaving = ref(false);
 
 const preferences = ref<UiPreferences>({
   compactLayout: false,
@@ -33,6 +43,43 @@ const preferences = ref<UiPreferences>({
   animateTextUpdates: true,
   hideFromScreenshots: true,
 });
+
+function createDefaultCaptureSettings(): CaptureSettings {
+  return {
+    useOcr: false,
+    provider: 'openrouter',
+    prompt: 'Read this screenshot and return the important text in plain form. Keep line breaks where useful.',
+    providers: {
+      openrouter: {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        apiKey: '',
+        model: 'openai/gpt-4o-mini',
+      },
+      ollama: {
+        baseUrl: 'http://127.0.0.1:11434',
+        apiKey: '',
+        model: 'llava:latest',
+      },
+      openai: {
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: '',
+        model: 'gpt-4.1-mini',
+      },
+      anthropic: {
+        baseUrl: 'https://api.anthropic.com',
+        apiKey: '',
+        model: 'claude-3-5-sonnet-latest',
+      },
+      gemini: {
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        apiKey: '',
+        model: 'gemini-2.0-flash',
+      },
+    },
+  };
+}
+
+const captureSettings = ref<CaptureSettings>(createDefaultCaptureSettings());
 
 const stage = computed<Stage>(() => {
   if (error.value) return 'error';
@@ -64,6 +111,11 @@ const shellClass = computed(() => ({
   [stageClass.value]: true,
   compact: preferences.value.compactLayout,
 }));
+const activeProviderLabel = computed(() => {
+  const found = PROVIDER_OPTIONS.find((option) => option.value === captureSettings.value.provider);
+  return found?.label || 'LLM';
+});
+const ocrModeLabel = computed(() => (captureSettings.value.useOcr ? 'OCR + LLM' : 'Screenshot + LLM'));
 
 const confidenceValue = computed(() =>
   confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`,
@@ -106,8 +158,48 @@ function applyMode(payload: OverlayModePayload) {
   }
 
   if (payload?.mode === 'selecting') {
-    status.value = 'Region selection is disabled. Running quick OCR instead.';
+    status.value = 'Region selection is disabled. Running quick capture instead.';
     lastUpdate.value = 'Selection disabled';
+  }
+}
+
+async function loadCaptureSettings() {
+  if (!window.overlayApi?.getSettings) {
+    return;
+  }
+
+  try {
+    const loaded = await window.overlayApi.getSettings();
+    if (loaded) {
+      captureSettings.value = loaded;
+    }
+  } catch (loadError) {
+    settingsError.value = loadError instanceof Error ? loadError.message : String(loadError);
+  }
+}
+
+async function saveCaptureSettings() {
+  settingsError.value = '';
+  settingsNotice.value = '';
+
+  if (!window.overlayApi?.updateSettings) {
+    settingsError.value = 'Bridge unavailable. Unable to save settings.';
+    return;
+  }
+
+  settingsSaving.value = true;
+  try {
+    const payload = JSON.parse(JSON.stringify(captureSettings.value)) as CaptureSettings;
+    const saved = await window.overlayApi.updateSettings(payload);
+    captureSettings.value = saved;
+    settingsNotice.value = 'Saved';
+    window.setTimeout(() => {
+      settingsNotice.value = '';
+    }, 2200);
+  } catch (saveError) {
+    settingsError.value = saveError instanceof Error ? saveError.message : String(saveError);
+  } finally {
+    settingsSaving.value = false;
   }
 }
 
@@ -190,6 +282,7 @@ onMounted(() => {
   bridgeReady.value = Boolean(window.overlayApi);
   window.addEventListener('keydown', onWindowKeydown);
   loadPreferences();
+  void loadCaptureSettings();
 
   if (!window.overlayApi) return;
 
@@ -256,7 +349,9 @@ onUnmounted(() => {
 
           <footer class="console-footer" v-if="preferences.showFooterHints">
             <span>{{ quickHotkey }}</span>
-            <span>{{ regionHotkey }} (mirrors quick OCR)</span>
+            <span>{{ regionHotkey }} (mirrors quick capture)</span>
+            <span>{{ ocrModeLabel }}</span>
+            <span>{{ activeProviderLabel }}</span>
             <span>{{ lastUpdate }}</span>
           </footer>
         </div>
@@ -264,43 +359,93 @@ onUnmounted(() => {
         <section v-else class="settings-view no-drag">
           <div class="settings-head">
             <h2>Settings</h2>
-            <p>Tune overlay behavior and view preferences.</p>
+            <p>Configure screenshot pipeline, LLM provider, and UI preferences.</p>
           </div>
 
           <div class="settings-grid">
-            <label class="settings-item">
-              <span>Compact layout</span>
-              <input type="checkbox" v-model="preferences.compactLayout" />
-            </label>
+            <div class="settings-panel">
+              <h3>Capture + LLM</h3>
 
-            <label class="settings-item">
-              <span>Show confidence meter</span>
-              <input type="checkbox" v-model="preferences.showConfidenceMeter" />
-            </label>
+              <label class="settings-item">
+                <span>Use OCR before LLM</span>
+                <input type="checkbox" v-model="captureSettings.useOcr" />
+              </label>
 
-            <label class="settings-item">
-              <span>Show footer hints</span>
-              <input type="checkbox" v-model="preferences.showFooterHints" />
-            </label>
+              <label class="settings-item">
+                <span>Provider</span>
+                <select v-model="captureSettings.provider">
+                  <option v-for="option in PROVIDER_OPTIONS" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
 
-            <label class="settings-item">
-              <span>Animate result updates</span>
-              <input type="checkbox" v-model="preferences.animateTextUpdates" />
-            </label>
+              <label class="settings-item">
+                <span>Model</span>
+                <input type="text" v-model="captureSettings.providers[captureSettings.provider].model" />
+              </label>
 
-            <label class="settings-item">
-              <span>Hide overlay in screenshots</span>
-              <input type="checkbox" v-model="preferences.hideFromScreenshots" />
-            </label>
+              <label class="settings-item">
+                <span>Base URL</span>
+                <input type="text" v-model="captureSettings.providers[captureSettings.provider].baseUrl" />
+              </label>
+
+              <label class="settings-item" v-if="captureSettings.provider !== 'ollama'">
+                <span>API key</span>
+                <input type="password" v-model="captureSettings.providers[captureSettings.provider].apiKey" />
+              </label>
+
+              <label class="settings-item settings-item-column">
+                <span>Prompt</span>
+                <textarea rows="4" v-model="captureSettings.prompt" />
+              </label>
+
+              <div class="settings-actions">
+                <button type="button" @click="saveCaptureSettings" :disabled="settingsSaving">
+                  {{ settingsSaving ? 'Saving...' : 'Save LLM Settings' }}
+                </button>
+                <span v-if="settingsNotice" class="settings-notice">{{ settingsNotice }}</span>
+              </div>
+              <p v-if="settingsError" class="settings-error">{{ settingsError }}</p>
+            </div>
+
+            <div class="settings-panel">
+              <h3>UI Preferences</h3>
+
+              <label class="settings-item">
+                <span>Compact layout</span>
+                <input type="checkbox" v-model="preferences.compactLayout" />
+              </label>
+
+              <label class="settings-item">
+                <span>Show confidence meter</span>
+                <input type="checkbox" v-model="preferences.showConfidenceMeter" />
+              </label>
+
+              <label class="settings-item">
+                <span>Show footer hints</span>
+                <input type="checkbox" v-model="preferences.showFooterHints" />
+              </label>
+
+              <label class="settings-item">
+                <span>Animate result updates</span>
+                <input type="checkbox" v-model="preferences.animateTextUpdates" />
+              </label>
+
+              <label class="settings-item">
+                <span>Hide overlay in screenshots</span>
+                <input type="checkbox" v-model="preferences.hideFromScreenshots" />
+              </label>
+            </div>
           </div>
 
           <div class="settings-shortcuts">
             <div>
-              <span>Quick OCR</span>
+              <span>Quick Capture</span>
               <strong>{{ quickHotkey }}</strong>
             </div>
             <div>
-              <span>Region OCR</span>
+              <span>Region Capture</span>
               <strong>{{ regionHotkey }}</strong>
             </div>
             <div>
@@ -509,10 +654,27 @@ onUnmounted(() => {
 }
 
 .settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+  overflow: auto;
+}
+
+.settings-panel {
   border: 1px solid rgba(55, 65, 81, 1);
   border-radius: 0.35rem;
   background: rgba(17, 24, 39, 0.88);
-  overflow: auto;
+  overflow: hidden;
+}
+
+.settings-panel h3 {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid rgba(55, 65, 81, 0.7);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 1);
 }
 
 .settings-item {
@@ -526,12 +688,72 @@ onUnmounted(() => {
   color: rgba(229, 231, 235, 1);
 }
 
-.settings-item:last-child {
-  border-bottom: none;
-}
-
 .settings-item input[type='checkbox'] {
   accent-color: rgba(14, 165, 233, 1);
+}
+
+.settings-item input[type='text'],
+.settings-item input[type='password'],
+.settings-item select,
+.settings-item textarea {
+  width: min(260px, 55%);
+  border-radius: 0.25rem;
+  border: 1px solid rgba(71, 85, 105, 0.9);
+  background: rgba(15, 23, 42, 0.95);
+  color: rgba(226, 232, 240, 1);
+  font-size: 0.68rem;
+  padding: 0.3rem 0.45rem;
+}
+
+.settings-item textarea {
+  width: 100%;
+  min-height: 4.8rem;
+  resize: vertical;
+  margin-top: 0.35rem;
+}
+
+.settings-item-column {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.6rem 0.6rem;
+}
+
+.settings-actions button {
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  background: rgba(14, 116, 144, 0.48);
+  color: rgba(224, 242, 254, 1);
+  border-radius: 0.3rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.34rem 0.55rem;
+}
+
+.settings-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.settings-notice {
+  font-size: 0.63rem;
+  color: rgba(134, 239, 172, 0.96);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.settings-error {
+  margin: 0;
+  padding: 0 0.6rem 0.58rem;
+  font-size: 0.66rem;
+  color: rgba(254, 202, 202, 0.96);
+  line-height: 1.3;
+  white-space: pre-wrap;
 }
 
 .settings-shortcuts {
@@ -606,6 +828,16 @@ onUnmounted(() => {
 @media (max-width: 720px) {
   .metrics-row {
     grid-template-columns: 1fr;
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-item input[type='text'],
+  .settings-item input[type='password'],
+  .settings-item select {
+    width: 58%;
   }
 
   .settings-view {

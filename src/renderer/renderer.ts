@@ -36,8 +36,8 @@ const quickHotkeyEl = document.getElementById('quickHotkey');
 const regionHotkeyEl = document.getElementById('regionHotkey');
 
 const uiState = {
-  status: 'Press Ctrl/Cmd + Shift + O for quick OCR.',
-  result: 'Waiting for OCR...',
+  status: 'Press Ctrl/Cmd + Shift + O for quick capture.',
+  result: 'Waiting for LLM output...',
   confidence: null as number | null,
   error: '',
   state: 'idle' as 'idle' | 'capturing' | 'processing' | 'done' | 'error',
