@@ -80,6 +80,10 @@ function createDefaultCaptureSettings(): CaptureSettings {
 }
 
 const captureSettings = ref<CaptureSettings>(createDefaultCaptureSettings());
+const lastSavedCaptureSettingsJson = ref(JSON.stringify(captureSettings.value));
+const captureSettingsDirty = computed(
+  () => JSON.stringify(captureSettings.value) !== lastSavedCaptureSettingsJson.value,
+);
 
 const stage = computed<Stage>(() => {
   if (error.value) return 'error';
@@ -172,19 +176,20 @@ async function loadCaptureSettings() {
     const loaded = await window.overlayApi.getSettings();
     if (loaded) {
       captureSettings.value = loaded;
+      lastSavedCaptureSettingsJson.value = JSON.stringify(loaded);
     }
   } catch (loadError) {
     settingsError.value = loadError instanceof Error ? loadError.message : String(loadError);
   }
 }
 
-async function saveCaptureSettings() {
+async function saveCaptureSettings(): Promise<boolean> {
   settingsError.value = '';
   settingsNotice.value = '';
 
   if (!window.overlayApi?.updateSettings) {
     settingsError.value = 'Bridge unavailable. Unable to save settings.';
-    return;
+    return false;
   }
 
   settingsSaving.value = true;
@@ -192,15 +197,48 @@ async function saveCaptureSettings() {
     const payload = JSON.parse(JSON.stringify(captureSettings.value)) as CaptureSettings;
     const saved = await window.overlayApi.updateSettings(payload);
     captureSettings.value = saved;
+    lastSavedCaptureSettingsJson.value = JSON.stringify(saved);
     settingsNotice.value = 'Saved';
     window.setTimeout(() => {
       settingsNotice.value = '';
     }, 2200);
+    return true;
   } catch (saveError) {
     settingsError.value = saveError instanceof Error ? saveError.message : String(saveError);
+    return false;
   } finally {
     settingsSaving.value = false;
   }
+}
+
+async function persistCaptureSettingsBeforeLeavingSettings(): Promise<boolean> {
+  if (activePage.value !== 'settings' || !captureSettingsDirty.value || settingsSaving.value) {
+    return true;
+  }
+
+  return saveCaptureSettings();
+}
+
+async function openConsolePage() {
+  const canLeave = await persistCaptureSettingsBeforeLeavingSettings();
+  if (!canLeave) {
+    return;
+  }
+
+  activePage.value = 'console';
+}
+
+function openSettingsPage() {
+  activePage.value = 'settings';
+}
+
+async function closeOverlayFromUi() {
+  const canLeave = await persistCaptureSettingsBeforeLeavingSettings();
+  if (!canLeave) {
+    return;
+  }
+
+  await hideConsole();
 }
 
 function loadPreferences() {
@@ -265,16 +303,16 @@ function onWindowKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     event.preventDefault();
     if (activePage.value === 'settings') {
-      activePage.value = 'console';
+      void openConsolePage();
       return;
     }
-    void hideConsole();
+    void closeOverlayFromUi();
     return;
   }
 
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === ',') {
     event.preventDefault();
-    activePage.value = 'settings';
+    openSettingsPage();
   }
 }
 
@@ -312,9 +350,9 @@ onUnmounted(() => {
         <AppTitlebar
           title="OCR Console"
           :active-page="activePage"
-          @console="activePage = 'console'"
-          @settings="activePage = 'settings'"
-          @close="hideConsole"
+          @console="openConsolePage"
+          @settings="openSettingsPage"
+          @close="closeOverlayFromUi"
         />
 
         <div class="console-body no-drag" v-if="activePage === 'console'">

@@ -428,13 +428,29 @@ function buildPrompt(prompt: string, ocrHint: string): string {
   return `${basePrompt}\n\nOCR hint (may include mistakes):\n${normalizedHint}`;
 }
 
-function ensureApiKey(provider: LlmProvider, apiKey: string): void {
+function ensureApiKey(
+  provider: LlmProvider,
+  apiKey: string,
+  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
+): void {
   if (provider === 'ollama') {
     return;
   }
 
   if (!apiKey.trim()) {
-    throw new Error(`Missing API key for ${provider}. Update it in Settings.`);
+    const providerName = providerLabel(provider);
+    const configuredElsewhere = providerConfigs
+      ? LLM_PROVIDERS.filter((candidate) => candidate !== provider && providerConfigs[candidate].apiKey.trim())
+      : [];
+
+    if (configuredElsewhere.length > 0) {
+      const configuredLabels = configuredElsewhere.map((candidate) => providerLabel(candidate)).join(', ');
+      throw new Error(
+        `Missing API key for ${providerName}. A key exists for ${configuredLabels}. Choose the matching provider or add a ${providerName} key in Settings, then save.`,
+      );
+    }
+
+    throw new Error(`Missing API key for ${providerName}. Add it in Settings for ${providerName}, then save.`);
   }
 }
 
@@ -461,8 +477,9 @@ async function requestOpenAiCompatible(
   prompt: string,
   imageBase64: string,
   extraHeaders: Record<string, string> = {},
+  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
 ): Promise<string> {
-  ensureApiKey(provider, config.apiKey);
+  ensureApiKey(provider, config.apiKey, providerConfigs);
   if (!config.model.trim()) {
     throw new Error(`Missing model for ${provider}. Update it in Settings.`);
   }
@@ -539,8 +556,13 @@ async function requestOllama(config: LlmProviderConfig, prompt: string, imageBas
   return text;
 }
 
-async function requestAnthropic(config: LlmProviderConfig, prompt: string, imageBase64: string): Promise<string> {
-  ensureApiKey('anthropic', config.apiKey);
+async function requestAnthropic(
+  config: LlmProviderConfig,
+  prompt: string,
+  imageBase64: string,
+  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
+): Promise<string> {
+  ensureApiKey('anthropic', config.apiKey, providerConfigs);
   if (!config.model.trim()) {
     throw new Error('Missing model for anthropic. Update it in Settings.');
   }
@@ -585,8 +607,13 @@ async function requestAnthropic(config: LlmProviderConfig, prompt: string, image
   return text;
 }
 
-async function requestGemini(config: LlmProviderConfig, prompt: string, imageBase64: string): Promise<string> {
-  ensureApiKey('gemini', config.apiKey);
+async function requestGemini(
+  config: LlmProviderConfig,
+  prompt: string,
+  imageBase64: string,
+  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
+): Promise<string> {
+  ensureApiKey('gemini', config.apiKey, providerConfigs);
   if (!config.model.trim()) {
     throw new Error('Missing model for gemini. Update it in Settings.');
   }
@@ -637,11 +664,11 @@ async function runLlmCapture(imageBuffer: Buffer, activeSettings: CaptureSetting
     return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64, {
       'HTTP-Referer': 'https://overlayfuzz.local',
       'X-Title': 'overlayFuzz',
-    });
+    }, activeSettings.providers);
   }
 
   if (provider === 'openai') {
-    return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64);
+    return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64, {}, activeSettings.providers);
   }
 
   if (provider === 'ollama') {
@@ -649,10 +676,10 @@ async function runLlmCapture(imageBuffer: Buffer, activeSettings: CaptureSetting
   }
 
   if (provider === 'anthropic') {
-    return requestAnthropic(providerConfig, prompt, imageBase64);
+    return requestAnthropic(providerConfig, prompt, imageBase64, activeSettings.providers);
   }
 
-  return requestGemini(providerConfig, prompt, imageBase64);
+  return requestGemini(providerConfig, prompt, imageBase64, activeSettings.providers);
 }
 
 function getConsoleBoundsForDisplay(
@@ -995,8 +1022,25 @@ async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captu
       ocrConfidence = bestResult.confidence ?? null;
     }
 
-    overlayWindow.webContents.send('ocr-status', `Sending screenshot to ${activeProvider}...`);
-    const llmText = await runLlmCapture(imageBuffer, activeSettings, ocrText);
+    let llmText = '';
+    try {
+      overlayWindow.webContents.send('ocr-status', `Sending screenshot to ${activeProvider}...`);
+      llmText = await runLlmCapture(imageBuffer, activeSettings, ocrText);
+    } catch (llmError) {
+      const llmErrorMessage = llmError instanceof Error ? llmError.message : String(llmError);
+      const hasOcrText = Boolean(activeSettings.useOcr && ocrText.trim());
+      if (hasOcrText) {
+        overlayWindow.webContents.send('ocr-result', {
+          text: ocrText.trim(),
+          confidence: ocrConfidence,
+          error: `LLM request failed: ${llmErrorMessage}. Showing OCR output only.`,
+        });
+        overlayWindow.webContents.send('ocr-status', 'LLM failed. Showing OCR output only.');
+        return true;
+      }
+
+      throw llmError;
+    }
 
     overlayWindow.webContents.send('ocr-result', {
       text: llmText,
