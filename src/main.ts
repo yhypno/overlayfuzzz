@@ -362,7 +362,8 @@ function sanitizeCaptureSettings(input: unknown, fallback: CaptureSettings = DEF
       },
       taskLlm: {
         provider: legacyProvider,
-        prompt: defaults.taskLlm.prompt,
+        // Preserve pre-migration prompt behavior for both stages.
+        prompt: legacyPrompt,
         config: cloneProviderConfig(legacyConfig),
       },
     };
