@@ -12,11 +12,16 @@ export interface LlmProviderConfig {
   model: string;
 }
 
-export interface CaptureSettings {
-  useOcr: boolean;
+export interface LlmRoleSettings {
   provider: LlmProvider;
   prompt: string;
-  providers: Record<LlmProvider, LlmProviderConfig>;
+  config: LlmProviderConfig;
+}
+
+export interface CaptureSettings {
+  useOcr: boolean;
+  imageLlm: LlmRoleSettings;
+  taskLlm: LlmRoleSettings;
 }
 
 export interface OverlayRegion {
