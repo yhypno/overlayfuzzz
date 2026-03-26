@@ -8,11 +8,16 @@ interface LlmProviderConfig {
   model: string;
 }
 
-interface CaptureSettings {
-  useOcr: boolean;
+interface LlmRoleSettings {
   provider: LlmProvider;
   prompt: string;
-  providers: Record<LlmProvider, LlmProviderConfig>;
+  config: LlmProviderConfig;
+}
+
+interface CaptureSettings {
+  useOcr: boolean;
+  imageLlm: LlmRoleSettings;
+  taskLlm: LlmRoleSettings;
 }
 
 contextBridge.exposeInMainWorld('overlayApi', {

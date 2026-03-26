@@ -41,43 +41,65 @@ interface LlmProviderConfig {
   model: string;
 }
 
-interface CaptureSettings {
-  useOcr: boolean;
+interface LlmRoleSettings {
   provider: LlmProvider;
   prompt: string;
-  providers: Record<LlmProvider, LlmProviderConfig>;
+  config: LlmProviderConfig;
+}
+
+interface CaptureSettings {
+  useOcr: boolean;
+  imageLlm: LlmRoleSettings;
+  taskLlm: LlmRoleSettings;
+}
+
+const DEFAULT_PROVIDER_CONFIGS: Record<LlmProvider, LlmProviderConfig> = {
+  openrouter: {
+    baseUrl: 'https://openrouter.ai/api/v1',
+    apiKey: (process.env.OPENROUTER_API_KEY || '').trim(),
+    model: 'openai/gpt-4o-mini',
+  },
+  ollama: {
+    baseUrl: 'http://127.0.0.1:11434',
+    apiKey: '',
+    model: 'llava:latest',
+  },
+  openai: {
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: (process.env.OPENAI_API_KEY || '').trim(),
+    model: 'gpt-4.1-mini',
+  },
+  anthropic: {
+    baseUrl: 'https://api.anthropic.com',
+    apiKey: (process.env.ANTHROPIC_API_KEY || '').trim(),
+    model: 'claude-3-5-sonnet-latest',
+  },
+  gemini: {
+    baseUrl: 'https://generativelanguage.googleapis.com',
+    apiKey: (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim(),
+    model: 'gemini-2.0-flash',
+  },
+};
+
+function cloneProviderConfig(config: LlmProviderConfig): LlmProviderConfig {
+  return { ...config };
+}
+
+function providerDefaults(provider: LlmProvider): LlmProviderConfig {
+  return cloneProviderConfig(DEFAULT_PROVIDER_CONFIGS[provider]);
 }
 
 const DEFAULT_CAPTURE_SETTINGS: CaptureSettings = {
   useOcr: false,
-  provider: 'openrouter',
-  prompt: 'Read this screenshot and return the important text in plain form. Keep line breaks where useful.',
-  providers: {
-    openrouter: {
-      baseUrl: 'https://openrouter.ai/api/v1',
-      apiKey: (process.env.OPENROUTER_API_KEY || '').trim(),
-      model: 'openai/gpt-4o-mini',
-    },
-    ollama: {
-      baseUrl: 'http://127.0.0.1:11434',
-      apiKey: '',
-      model: 'llava:latest',
-    },
-    openai: {
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: (process.env.OPENAI_API_KEY || '').trim(),
-      model: 'gpt-4.1-mini',
-    },
-    anthropic: {
-      baseUrl: 'https://api.anthropic.com',
-      apiKey: (process.env.ANTHROPIC_API_KEY || '').trim(),
-      model: 'claude-3-5-sonnet-latest',
-    },
-    gemini: {
-      baseUrl: 'https://generativelanguage.googleapis.com',
-      apiKey: (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim(),
-      model: 'gemini-2.0-flash',
-    },
+  imageLlm: {
+    provider: 'openrouter',
+    prompt: 'Read this screenshot and return the important text in plain form. Keep line breaks where useful.',
+    config: providerDefaults('openrouter'),
+  },
+  taskLlm: {
+    provider: 'openrouter',
+    prompt: 'Using the extracted text below, return the final result in plain form. Keep line breaks where useful.',
+    config: providerDefaults('openrouter'),
   },
 };
 
@@ -256,14 +278,15 @@ function normalizeString(value: unknown, fallback = ''): string {
 function cloneCaptureSettings(settings: CaptureSettings): CaptureSettings {
   return {
     useOcr: Boolean(settings.useOcr),
-    provider: settings.provider,
-    prompt: settings.prompt,
-    providers: {
-      openrouter: { ...settings.providers.openrouter },
-      ollama: { ...settings.providers.ollama },
-      openai: { ...settings.providers.openai },
-      anthropic: { ...settings.providers.anthropic },
-      gemini: { ...settings.providers.gemini },
+    imageLlm: {
+      provider: settings.imageLlm.provider,
+      prompt: settings.imageLlm.prompt,
+      config: cloneProviderConfig(settings.imageLlm.config),
+    },
+    taskLlm: {
+      provider: settings.taskLlm.provider,
+      prompt: settings.taskLlm.prompt,
+      config: cloneProviderConfig(settings.taskLlm.config),
     },
   };
 }
@@ -290,25 +313,66 @@ function sanitizeProviderConfig(value: unknown, fallback: LlmProviderConfig): Ll
   };
 }
 
+function sanitizeLegacyProviderMap(value: unknown): Record<LlmProvider, LlmProviderConfig> {
+  const source = typeof value === 'object' && value ? (value as Record<string, unknown>) : {};
+  return {
+    openrouter: sanitizeProviderConfig(source.openrouter, providerDefaults('openrouter')),
+    ollama: sanitizeProviderConfig(source.ollama, providerDefaults('ollama')),
+    openai: sanitizeProviderConfig(source.openai, providerDefaults('openai')),
+    anthropic: sanitizeProviderConfig(source.anthropic, providerDefaults('anthropic')),
+    gemini: sanitizeProviderConfig(source.gemini, providerDefaults('gemini')),
+  };
+}
+
+function sanitizeLlmRoleSettings(
+  value: unknown,
+  fallback: LlmRoleSettings,
+  legacyProviders?: Record<LlmProvider, LlmProviderConfig>,
+): LlmRoleSettings {
+  const source = typeof value === 'object' && value ? (value as Partial<LlmRoleSettings>) : {};
+  const provider = normalizeProvider(source.provider, fallback.provider);
+  const prompt = normalizeString(source.prompt, fallback.prompt) || fallback.prompt;
+  const fallbackConfig = legacyProviders?.[provider] || (provider === fallback.provider ? fallback.config : providerDefaults(provider));
+  const sourceConfig = source.config ?? legacyProviders?.[provider];
+
+  return {
+    provider,
+    prompt,
+    config: sanitizeProviderConfig(sourceConfig, fallbackConfig),
+  };
+}
+
 function sanitizeCaptureSettings(input: unknown, fallback: CaptureSettings = DEFAULT_CAPTURE_SETTINGS): CaptureSettings {
   const defaults = cloneCaptureSettings(fallback);
-  const source = typeof input === 'object' && input ? (input as Partial<CaptureSettings>) : {};
-  const sourceProviders = typeof source.providers === 'object' && source.providers ? source.providers : {};
+  const source = typeof input === 'object' && input ? (input as Record<string, unknown>) : {};
+  const legacyProviders = sanitizeLegacyProviderMap(source.providers);
+  const hasRoleSettings = typeof source.imageLlm === 'object' || typeof source.taskLlm === 'object';
 
-  const prompt = normalizeString(source.prompt, defaults.prompt) || defaults.prompt;
-  const provider = normalizeProvider(source.provider, defaults.provider);
+  if (!hasRoleSettings) {
+    const legacyProvider = normalizeProvider(source.provider, defaults.imageLlm.provider);
+    const legacyPrompt = normalizeString(source.prompt, defaults.imageLlm.prompt) || defaults.imageLlm.prompt;
+    const legacyConfig = legacyProviders[legacyProvider];
+
+    return {
+      useOcr: typeof source.useOcr === 'boolean' ? source.useOcr : defaults.useOcr,
+      imageLlm: {
+        provider: legacyProvider,
+        prompt: legacyPrompt,
+        config: cloneProviderConfig(legacyConfig),
+      },
+      taskLlm: {
+        provider: legacyProvider,
+        // Preserve pre-migration prompt behavior for both stages.
+        prompt: legacyPrompt,
+        config: cloneProviderConfig(legacyConfig),
+      },
+    };
+  }
 
   return {
     useOcr: typeof source.useOcr === 'boolean' ? source.useOcr : defaults.useOcr,
-    provider,
-    prompt,
-    providers: {
-      openrouter: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).openrouter, defaults.providers.openrouter),
-      ollama: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).ollama, defaults.providers.ollama),
-      openai: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).openai, defaults.providers.openai),
-      anthropic: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).anthropic, defaults.providers.anthropic),
-      gemini: sanitizeProviderConfig((sourceProviders as Record<string, unknown>).gemini, defaults.providers.gemini),
-    },
+    imageLlm: sanitizeLlmRoleSettings(source.imageLlm, defaults.imageLlm, legacyProviders),
+    taskLlm: sanitizeLlmRoleSettings(source.taskLlm, defaults.taskLlm, legacyProviders),
   };
 }
 
@@ -417,39 +481,27 @@ async function postJson(url: string, body: Record<string, unknown>, headers: Rec
   return parsed;
 }
 
-function buildPrompt(prompt: string, ocrHint: string): string {
-  const basePrompt = prompt.trim() || DEFAULT_CAPTURE_SETTINGS.prompt;
-  const normalizedHint = ocrHint.trim();
+function buildImagePrompt(prompt: string): string {
+  return prompt.trim() || DEFAULT_CAPTURE_SETTINGS.imageLlm.prompt;
+}
 
-  if (!normalizedHint) {
+function buildTaskPrompt(prompt: string, extractedText: string): string {
+  const basePrompt = prompt.trim() || DEFAULT_CAPTURE_SETTINGS.taskLlm.prompt;
+  const normalizedText = extractedText.trim();
+  if (!normalizedText) {
     return basePrompt;
   }
 
-  return `${basePrompt}\n\nOCR hint (may include mistakes):\n${normalizedHint}`;
+  return `${basePrompt}\n\nExtracted text:\n${normalizedText}`;
 }
 
-function ensureApiKey(
-  provider: LlmProvider,
-  apiKey: string,
-  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
-): void {
+function ensureApiKey(provider: LlmProvider, apiKey: string): void {
   if (provider === 'ollama') {
     return;
   }
 
   if (!apiKey.trim()) {
     const providerName = providerLabel(provider);
-    const configuredElsewhere = providerConfigs
-      ? LLM_PROVIDERS.filter((candidate) => candidate !== provider && providerConfigs[candidate].apiKey.trim())
-      : [];
-
-    if (configuredElsewhere.length > 0) {
-      const configuredLabels = configuredElsewhere.map((candidate) => providerLabel(candidate)).join(', ');
-      throw new Error(
-        `Missing API key for ${providerName}. A key exists for ${configuredLabels}. Choose the matching provider or add a ${providerName} key in Settings, then save.`,
-      );
-    }
-
     throw new Error(`Missing API key for ${providerName}. Add it in Settings for ${providerName}, then save.`);
   }
 }
@@ -475,11 +527,10 @@ async function requestOpenAiCompatible(
   provider: LlmProvider,
   config: LlmProviderConfig,
   prompt: string,
-  imageBase64: string,
+  imageBase64?: string,
   extraHeaders: Record<string, string> = {},
-  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
 ): Promise<string> {
-  ensureApiKey(provider, config.apiKey, providerConfigs);
+  ensureApiKey(provider, config.apiKey);
   if (!config.model.trim()) {
     throw new Error(`Missing model for ${provider}. Update it in Settings.`);
   }
@@ -500,12 +551,16 @@ async function requestOpenAiCompatible(
               type: 'text',
               text: prompt,
             },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:image/png;base64,${imageBase64}`,
-              },
-            },
+            ...(imageBase64
+              ? [
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:image/png;base64,${imageBase64}`,
+                    },
+                  },
+                ]
+              : []),
           ],
         },
       ],
@@ -527,7 +582,7 @@ async function requestOpenAiCompatible(
   return text;
 }
 
-async function requestOllama(config: LlmProviderConfig, prompt: string, imageBase64: string): Promise<string> {
+async function requestOllama(config: LlmProviderConfig, prompt: string, imageBase64?: string): Promise<string> {
   if (!config.model.trim()) {
     throw new Error('Missing model for ollama. Update it in Settings.');
   }
@@ -543,7 +598,7 @@ async function requestOllama(config: LlmProviderConfig, prompt: string, imageBas
       {
         role: 'user',
         content: prompt,
-        images: [imageBase64],
+        ...(imageBase64 ? { images: [imageBase64] } : {}),
       },
     ],
   });
@@ -559,10 +614,9 @@ async function requestOllama(config: LlmProviderConfig, prompt: string, imageBas
 async function requestAnthropic(
   config: LlmProviderConfig,
   prompt: string,
-  imageBase64: string,
-  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
+  imageBase64?: string,
 ): Promise<string> {
-  ensureApiKey('anthropic', config.apiKey, providerConfigs);
+  ensureApiKey('anthropic', config.apiKey);
   if (!config.model.trim()) {
     throw new Error('Missing model for anthropic. Update it in Settings.');
   }
@@ -581,14 +635,18 @@ async function requestAnthropic(
           role: 'user',
           content: [
             { type: 'text', text: prompt },
-            {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/png',
-                data: imageBase64,
-              },
-            },
+            ...(imageBase64
+              ? [
+                  {
+                    type: 'image',
+                    source: {
+                      type: 'base64',
+                      media_type: 'image/png',
+                      data: imageBase64,
+                    },
+                  },
+                ]
+              : []),
           ],
         },
       ],
@@ -610,10 +668,9 @@ async function requestAnthropic(
 async function requestGemini(
   config: LlmProviderConfig,
   prompt: string,
-  imageBase64: string,
-  providerConfigs?: Record<LlmProvider, LlmProviderConfig>,
+  imageBase64?: string,
 ): Promise<string> {
-  ensureApiKey('gemini', config.apiKey, providerConfigs);
+  ensureApiKey('gemini', config.apiKey);
   if (!config.model.trim()) {
     throw new Error('Missing model for gemini. Update it in Settings.');
   }
@@ -627,12 +684,16 @@ async function requestGemini(
       {
         parts: [
           { text: prompt },
-          {
-            inline_data: {
-              mime_type: 'image/png',
-              data: imageBase64,
-            },
-          },
+          ...(imageBase64
+            ? [
+                {
+                  inline_data: {
+                    mime_type: 'image/png',
+                    data: imageBase64,
+                  },
+                },
+              ]
+            : []),
         ],
       },
     ],
@@ -654,21 +715,21 @@ async function requestGemini(
   return text;
 }
 
-async function runLlmCapture(imageBuffer: Buffer, activeSettings: CaptureSettings, ocrHint: string): Promise<string> {
-  const provider = activeSettings.provider;
-  const providerConfig = activeSettings.providers[provider];
-  const prompt = buildPrompt(activeSettings.prompt, ocrHint);
+async function runLlmImageExtraction(imageBuffer: Buffer, settings: LlmRoleSettings): Promise<string> {
+  const provider = settings.provider;
+  const providerConfig = settings.config;
+  const prompt = buildImagePrompt(settings.prompt);
   const imageBase64 = imageBuffer.toString('base64');
 
   if (provider === 'openrouter') {
     return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64, {
       'HTTP-Referer': 'https://overlayfuzz.local',
       'X-Title': 'overlayFuzz',
-    }, activeSettings.providers);
+    });
   }
 
   if (provider === 'openai') {
-    return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64, {}, activeSettings.providers);
+    return requestOpenAiCompatible(provider, providerConfig, prompt, imageBase64);
   }
 
   if (provider === 'ollama') {
@@ -676,10 +737,37 @@ async function runLlmCapture(imageBuffer: Buffer, activeSettings: CaptureSetting
   }
 
   if (provider === 'anthropic') {
-    return requestAnthropic(providerConfig, prompt, imageBase64, activeSettings.providers);
+    return requestAnthropic(providerConfig, prompt, imageBase64);
   }
 
-  return requestGemini(providerConfig, prompt, imageBase64, activeSettings.providers);
+  return requestGemini(providerConfig, prompt, imageBase64);
+}
+
+async function runLlmTask(extractedText: string, settings: LlmRoleSettings): Promise<string> {
+  const provider = settings.provider;
+  const providerConfig = settings.config;
+  const prompt = buildTaskPrompt(settings.prompt, extractedText);
+
+  if (provider === 'openrouter') {
+    return requestOpenAiCompatible(provider, providerConfig, prompt, undefined, {
+      'HTTP-Referer': 'https://overlayfuzz.local',
+      'X-Title': 'overlayFuzz',
+    });
+  }
+
+  if (provider === 'openai') {
+    return requestOpenAiCompatible(provider, providerConfig, prompt);
+  }
+
+  if (provider === 'ollama') {
+    return requestOllama(providerConfig, prompt);
+  }
+
+  if (provider === 'anthropic') {
+    return requestAnthropic(providerConfig, prompt);
+  }
+
+  return requestGemini(providerConfig, prompt);
 }
 
 function getConsoleBoundsForDisplay(
@@ -1009,33 +1097,37 @@ async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captu
 
   try {
     const activeSettings = cloneCaptureSettings(captureSettings);
-    const activeProvider = providerLabel(activeSettings.provider);
     const capture = await captureFn();
-    const imageBuffer = getLlmImageBuffer(capture);
-    let ocrText = '';
+    let extractedText = '';
     let ocrConfidence: number | null = null;
 
     if (activeSettings.useOcr) {
       overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
       const bestResult = await runWorkerOcr(capture);
-      ocrText = bestResult.text || '';
+      extractedText = bestResult.text || '';
       ocrConfidence = bestResult.confidence ?? null;
+    } else {
+      const imageProvider = providerLabel(activeSettings.imageLlm.provider);
+      overlayWindow.webContents.send('ocr-status', `Extracting text from screenshot via ${imageProvider}...`);
+      const imageBuffer = getLlmImageBuffer(capture);
+      extractedText = await runLlmImageExtraction(imageBuffer, activeSettings.imageLlm);
     }
 
-    let llmText = '';
+    let taskText = '';
+    const taskProvider = providerLabel(activeSettings.taskLlm.provider);
     try {
-      overlayWindow.webContents.send('ocr-status', `Sending screenshot to ${activeProvider}...`);
-      llmText = await runLlmCapture(imageBuffer, activeSettings, ocrText);
+      overlayWindow.webContents.send('ocr-status', `Running task LLM via ${taskProvider}...`);
+      taskText = await runLlmTask(extractedText, activeSettings.taskLlm);
     } catch (llmError) {
       const llmErrorMessage = llmError instanceof Error ? llmError.message : String(llmError);
-      const hasOcrText = Boolean(activeSettings.useOcr && ocrText.trim());
-      if (hasOcrText) {
+      const hasExtractedText = Boolean(extractedText.trim());
+      if (hasExtractedText) {
         overlayWindow.webContents.send('ocr-result', {
-          text: ocrText.trim(),
+          text: extractedText.trim(),
           confidence: ocrConfidence,
-          error: `LLM request failed: ${llmErrorMessage}. Showing OCR output only.`,
+          error: `Task LLM failed: ${llmErrorMessage}. Showing extracted text only.`,
         });
-        overlayWindow.webContents.send('ocr-status', 'LLM failed. Showing OCR output only.');
+        overlayWindow.webContents.send('ocr-status', 'Task LLM failed. Showing extracted text only.');
         return true;
       }
 
@@ -1043,10 +1135,10 @@ async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captu
     }
 
     overlayWindow.webContents.send('ocr-result', {
-      text: llmText,
+      text: taskText,
       confidence: ocrConfidence,
     });
-    overlayWindow.webContents.send('ocr-status', `Done (${activeProvider})`);
+    overlayWindow.webContents.send('ocr-status', `Done (${taskProvider})`);
     return true;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

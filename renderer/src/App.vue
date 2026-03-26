@@ -24,7 +24,7 @@ const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
 ];
 
 const status = ref('Press Ctrl/Cmd + Shift + O for quick capture. Ctrl/Cmd + Shift + R mirrors quick capture.');
-const result = ref('Waiting for LLM output...');
+const result = ref('Waiting for Task LLM output...');
 const confidence = ref<number | null>(null);
 const error = ref('');
 const bridgeReady = ref(false);
@@ -47,36 +47,76 @@ const preferences = ref<UiPreferences>({
 function createDefaultCaptureSettings(): CaptureSettings {
   return {
     useOcr: false,
-    provider: 'openrouter',
-    prompt: 'Read this screenshot and return the important text in plain form. Keep line breaks where useful.',
-    providers: {
-      openrouter: {
+    imageLlm: {
+      provider: 'openrouter',
+      prompt: 'Read this screenshot and return the important text in plain form. Keep line breaks where useful.',
+      config: {
         baseUrl: 'https://openrouter.ai/api/v1',
         apiKey: '',
         model: 'openai/gpt-4o-mini',
       },
-      ollama: {
-        baseUrl: 'http://127.0.0.1:11434',
+    },
+    taskLlm: {
+      provider: 'openrouter',
+      prompt: 'Using the extracted text below, return the final result in plain form. Keep line breaks where useful.',
+      config: {
+        baseUrl: 'https://openrouter.ai/api/v1',
         apiKey: '',
-        model: 'llava:latest',
-      },
-      openai: {
-        baseUrl: 'https://api.openai.com/v1',
-        apiKey: '',
-        model: 'gpt-4.1-mini',
-      },
-      anthropic: {
-        baseUrl: 'https://api.anthropic.com',
-        apiKey: '',
-        model: 'claude-3-5-sonnet-latest',
-      },
-      gemini: {
-        baseUrl: 'https://generativelanguage.googleapis.com',
-        apiKey: '',
-        model: 'gemini-2.0-flash',
+        model: 'openai/gpt-4o-mini',
       },
     },
   };
+}
+
+function providerLabel(provider: LlmProvider): string {
+  const found = PROVIDER_OPTIONS.find((option) => option.value === provider);
+  return found?.label || 'LLM';
+}
+
+function providerPreset(provider: LlmProvider) {
+  switch (provider) {
+    case 'openrouter':
+      return {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        apiKey: '',
+        model: 'openai/gpt-4o-mini',
+      };
+    case 'ollama':
+      return {
+        baseUrl: 'http://127.0.0.1:11434',
+        apiKey: '',
+        model: 'llava:latest',
+      };
+    case 'openai':
+      return {
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: '',
+        model: 'gpt-4.1-mini',
+      };
+    case 'anthropic':
+      return {
+        baseUrl: 'https://api.anthropic.com',
+        apiKey: '',
+        model: 'claude-3-5-sonnet-latest',
+      };
+    case 'gemini':
+      return {
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        apiKey: '',
+        model: 'gemini-2.0-flash',
+      };
+    default:
+      return {
+        baseUrl: '',
+        apiKey: '',
+        model: '',
+      };
+  }
+}
+
+function applyProviderDefaults(role: 'imageLlm' | 'taskLlm') {
+  const roleSettings = captureSettings.value[role];
+  roleSettings.config = providerPreset(roleSettings.provider);
 }
 
 const captureSettings = ref<CaptureSettings>(createDefaultCaptureSettings());
@@ -90,7 +130,7 @@ const stage = computed<Stage>(() => {
 
   const text = `${status.value} ${lastUpdate.value}`.toLowerCase();
   if (text.includes('captur')) return 'capturing';
-  if (text.includes('running') || text.includes('process')) return 'processing';
+  if (text.includes('running') || text.includes('process') || text.includes('extract')) return 'processing';
   if (text.includes('done') || text.includes('complete')) return 'done';
   return 'idle';
 });
@@ -115,11 +155,14 @@ const shellClass = computed(() => ({
   [stageClass.value]: true,
   compact: preferences.value.compactLayout,
 }));
-const activeProviderLabel = computed(() => {
-  const found = PROVIDER_OPTIONS.find((option) => option.value === captureSettings.value.provider);
-  return found?.label || 'LLM';
-});
-const ocrModeLabel = computed(() => (captureSettings.value.useOcr ? 'OCR + LLM' : 'Screenshot + LLM'));
+const imageProviderLabel = computed(() => providerLabel(captureSettings.value.imageLlm.provider));
+const taskProviderLabel = computed(() => providerLabel(captureSettings.value.taskLlm.provider));
+const ocrModeLabel = computed(() => (captureSettings.value.useOcr ? 'OCR -> Task LLM' : 'Image LLM -> Task LLM'));
+const llmPipelineLabel = computed(() =>
+  captureSettings.value.useOcr
+    ? `Task LLM: ${taskProviderLabel.value}`
+    : `Image LLM: ${imageProviderLabel.value} -> Task LLM: ${taskProviderLabel.value}`,
+);
 
 const confidenceValue = computed(() =>
   confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`,
@@ -389,7 +432,7 @@ onUnmounted(() => {
             <span>{{ quickHotkey }}</span>
             <span>{{ regionHotkey }} (mirrors quick capture)</span>
             <span>{{ ocrModeLabel }}</span>
-            <span>{{ activeProviderLabel }}</span>
+            <span>{{ llmPipelineLabel }}</span>
             <span>{{ lastUpdate }}</span>
           </footer>
         </div>
@@ -409,34 +452,75 @@ onUnmounted(() => {
                 <input type="checkbox" v-model="captureSettings.useOcr" />
               </label>
 
-              <label class="settings-item">
-                <span>Provider</span>
-                <select v-model="captureSettings.provider">
-                  <option v-for="option in PROVIDER_OPTIONS" :key="option.value" :value="option.value">
-                    {{ option.label }}
-                  </option>
-                </select>
-              </label>
+              <p class="settings-note" v-if="captureSettings.useOcr">
+                OCR is the extraction step. Only Task LLM is used.
+              </p>
 
-              <label class="settings-item">
-                <span>Model</span>
-                <input type="text" v-model="captureSettings.providers[captureSettings.provider].model" />
-              </label>
+              <div class="llm-role" v-if="!captureSettings.useOcr">
+                <h4>Image LLM (Extraction)</h4>
 
-              <label class="settings-item">
-                <span>Base URL</span>
-                <input type="text" v-model="captureSettings.providers[captureSettings.provider].baseUrl" />
-              </label>
+                <label class="settings-item">
+                  <span>Provider</span>
+                  <select v-model="captureSettings.imageLlm.provider" @change="applyProviderDefaults('imageLlm')">
+                    <option v-for="option in PROVIDER_OPTIONS" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
 
-              <label class="settings-item" v-if="captureSettings.provider !== 'ollama'">
-                <span>API key</span>
-                <input type="password" v-model="captureSettings.providers[captureSettings.provider].apiKey" />
-              </label>
+                <label class="settings-item">
+                  <span>Model</span>
+                  <input type="text" v-model="captureSettings.imageLlm.config.model" />
+                </label>
 
-              <label class="settings-item settings-item-column">
-                <span>Prompt</span>
-                <textarea rows="4" v-model="captureSettings.prompt" />
-              </label>
+                <label class="settings-item">
+                  <span>Base URL</span>
+                  <input type="text" v-model="captureSettings.imageLlm.config.baseUrl" />
+                </label>
+
+                <label class="settings-item" v-if="captureSettings.imageLlm.provider !== 'ollama'">
+                  <span>API key</span>
+                  <input type="password" v-model="captureSettings.imageLlm.config.apiKey" />
+                </label>
+
+                <label class="settings-item settings-item-column">
+                  <span>Image prompt</span>
+                  <textarea rows="4" v-model="captureSettings.imageLlm.prompt" />
+                </label>
+              </div>
+
+              <div class="llm-role">
+                <h4>Task LLM</h4>
+
+                <label class="settings-item">
+                  <span>Provider</span>
+                  <select v-model="captureSettings.taskLlm.provider" @change="applyProviderDefaults('taskLlm')">
+                    <option v-for="option in PROVIDER_OPTIONS" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
+
+                <label class="settings-item">
+                  <span>Model</span>
+                  <input type="text" v-model="captureSettings.taskLlm.config.model" />
+                </label>
+
+                <label class="settings-item">
+                  <span>Base URL</span>
+                  <input type="text" v-model="captureSettings.taskLlm.config.baseUrl" />
+                </label>
+
+                <label class="settings-item" v-if="captureSettings.taskLlm.provider !== 'ollama'">
+                  <span>API key</span>
+                  <input type="password" v-model="captureSettings.taskLlm.config.apiKey" />
+                </label>
+
+                <label class="settings-item settings-item-column">
+                  <span>Task prompt</span>
+                  <textarea rows="4" v-model="captureSettings.taskLlm.prompt" />
+                </label>
+              </div>
 
               <div class="settings-actions">
                 <button type="button" @click="saveCaptureSettings" :disabled="settingsSaving">
@@ -713,6 +797,31 @@ onUnmounted(() => {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: rgba(148, 163, 184, 1);
+}
+
+.settings-note {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
+  font-size: 0.66rem;
+  color: rgba(147, 197, 253, 1);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.llm-role {
+  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
+}
+
+.llm-role h4 {
+  margin: 0;
+  padding: 0.46rem 0.6rem;
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(125, 211, 252, 1);
+  background: rgba(30, 41, 59, 0.55);
+  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
 }
 
 .settings-item {
