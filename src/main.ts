@@ -3,7 +3,6 @@ import {
   BrowserWindow,
   globalShortcut,
   ipcMain,
-  nativeImage,
   screen,
   type BrowserWindowConstructorOptions,
   type Display,
@@ -16,7 +15,6 @@ import screenshot from 'screenshot-desktop';
 const HOTKEY_QUICK_CAPTURE = 'CommandOrControl+Shift+O';
 const HOTKEY_REGION_CAPTURE = 'CommandOrControl+Shift+R';
 const HOTKEY_DEBOUNCE_MS = 250;
-const CAPTURE_SIZE = { width: 700, height: 260 };
 const OVERLAY_TARGET_TITLE = (process.env.OVERLAY_FUZZ_TARGET_WINDOW_TITLE || '').trim();
 const ENABLE_OVERLAY_ATTACH = (process.env.OVERLAY_FUZZ_ATTACH_TO_TARGET || '').trim() === '1';
 const VITE_DEV_SERVER_URL = (process.env.VITE_DEV_SERVER_URL || '').trim();
@@ -26,8 +24,8 @@ const LEGACY_RENDERER_INDEX = path.join(PROJECT_ROOT, 'build', 'renderer', 'inde
 const OVERLAY_MODES = {
   CONSOLE: 'console',
 } as const;
-const CONSOLE_MIN_SIZE = { width: 520, height: 360 };
-const CONSOLE_DEFAULT_SIZE = { width: 760, height: 540 };
+const CONSOLE_MIN_SIZE = { width: 460, height: 300 };
+const CONSOLE_DEFAULT_SIZE = { width: 640, height: 320 };
 const CONSOLE_WINDOW_MARGIN = 28;
 const OCR_WORKER_ENTRY = path.join(__dirname, 'ocr-worker.js');
 const CAPTURE_SETTINGS_FILE = 'overlayfuzz-settings.json';
@@ -161,6 +159,7 @@ let overlayMode: OverlayMode = OVERLAY_MODES.CONSOLE;
 let consoleWindowBounds: Electron.Rectangle | null = null;
 let captureSettings: CaptureSettings = cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
 let hideOverlayFromScreenshots = true;
+let latestCapture: CaptureResult | null = null;
 
 function safeRequire(moduleName: string): { module: any; error: Error | null } {
   try {
@@ -485,8 +484,8 @@ function buildImagePrompt(prompt: string): string {
   return prompt.trim() || DEFAULT_CAPTURE_SETTINGS.imageLlm.prompt;
 }
 
-function buildTaskPrompt(prompt: string, extractedText: string): string {
-  const basePrompt = prompt.trim() || DEFAULT_CAPTURE_SETTINGS.taskLlm.prompt;
+function buildTaskPrompt(instruction: string, extractedText: string): string {
+  const basePrompt = instruction.trim() || DEFAULT_CAPTURE_SETTINGS.taskLlm.prompt;
   const normalizedText = extractedText.trim();
   if (!normalizedText) {
     return basePrompt;
@@ -743,10 +742,10 @@ async function runLlmImageExtraction(imageBuffer: Buffer, settings: LlmRoleSetti
   return requestGemini(providerConfig, prompt, imageBase64);
 }
 
-async function runLlmTask(extractedText: string, settings: LlmRoleSettings): Promise<string> {
+async function runLlmTask(extractedText: string, settings: LlmRoleSettings, taskInstruction: string): Promise<string> {
   const provider = settings.provider;
   const providerConfig = settings.config;
-  const prompt = buildTaskPrompt(settings.prompt, extractedText);
+  const prompt = buildTaskPrompt(taskInstruction, extractedText);
 
   if (provider === 'openrouter') {
     return requestOpenAiCompatible(provider, providerConfig, prompt, undefined, {
@@ -975,22 +974,16 @@ function ensureOcrWorkerThread(): Promise<Worker> {
 async function runWorkerOcr(capture: CaptureResult): Promise<OcrResultPayload> {
   const thread = await ensureOcrWorkerThread();
   const requestId = ++ocrWorkerRequestSeq;
-  const bytes = new Uint8Array(capture.buffer.buffer, capture.buffer.byteOffset, capture.buffer.byteLength);
+  const bytes = new Uint8Array(capture.buffer);
 
   return new Promise((resolve, reject) => {
     ocrWorkerPending.set(requestId, { resolve, reject: (error) => reject(error) });
     try {
-      thread.postMessage(
-        {
-          type: 'crop-and-recognize',
-          requestId,
-          image: bytes,
-          crop: capture.crop,
-          displayWidth: capture.displayWidth,
-          displayHeight: capture.displayHeight,
-        },
-        [bytes.buffer as ArrayBuffer],
-      );
+      thread.postMessage({
+        type: 'recognize',
+        requestId,
+        image: bytes,
+      });
     } catch (error) {
       settleOcrRequest(requestId, error instanceof Error ? error : new Error(String(error)));
     }
@@ -1018,20 +1011,11 @@ async function disposeOcrWorkerThread(): Promise<void> {
 
 interface CaptureResult {
   buffer: Buffer;
-  crop: { x: number; y: number; width: number; height: number };
-  displayWidth: number;
-  displayHeight: number;
 }
 
 async function captureAroundCursor(): Promise<CaptureResult> {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
-
-  const captureWidth = Math.min(CAPTURE_SIZE.width, display.bounds.width);
-  const captureHeight = Math.min(CAPTURE_SIZE.height, display.bounds.height);
-
-  const cursorX = cursor.x - display.bounds.x;
-  const cursorY = cursor.y - display.bounds.y;
 
   let buffer: Buffer;
   try {
@@ -1040,64 +1024,29 @@ async function captureAroundCursor(): Promise<CaptureResult> {
     buffer = (await screenshot({ format: 'png' })) as Buffer;
   }
 
-  return {
-    buffer,
-    crop: {
-      x: cursorX - captureWidth / 2,
-      y: cursorY - captureHeight / 2,
-      width: captureWidth,
-      height: captureHeight,
-    },
-    displayWidth: display.bounds.width,
-    displayHeight: display.bounds.height,
-  };
+  return { buffer };
 }
 
 function getLlmImageBuffer(capture: CaptureResult): Buffer {
-  const sourceImage = nativeImage.createFromBuffer(capture.buffer);
-  if (sourceImage.isEmpty()) {
-    return capture.buffer;
-  }
-
-  const sourceSize = sourceImage.getSize();
-  if (sourceSize.width <= 0 || sourceSize.height <= 0) {
-    return capture.buffer;
-  }
-
-  const scaleX = sourceSize.width / Math.max(capture.displayWidth, 1);
-  const scaleY = sourceSize.height / Math.max(capture.displayHeight, 1);
-  const left = Math.round(capture.crop.x * scaleX);
-  const top = Math.round(capture.crop.y * scaleY);
-  const cropX = Math.max(0, Math.min(sourceSize.width - 1, left));
-  const cropY = Math.max(0, Math.min(sourceSize.height - 1, top));
-  const cropW = Math.min(Math.max(1, Math.round(capture.crop.width * scaleX)), sourceSize.width - cropX);
-  const cropH = Math.min(Math.max(1, Math.round(capture.crop.height * scaleY)), sourceSize.height - cropY);
-
-  try {
-    return sourceImage
-      .crop({
-        x: cropX,
-        y: cropY,
-        width: cropW,
-        height: cropH,
-      })
-      .toPNG();
-  } catch {
-    return capture.buffer;
-  }
+  return capture.buffer;
 }
 
-async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captureMessage: string): Promise<boolean> {
+async function runCapturePipeline(capture: CaptureResult, query: string): Promise<boolean> {
   if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
     return false;
   }
 
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) {
+    overlayWindow.webContents.send('ocr-status', 'Enter a query before sending.');
+    return false;
+  }
+
   isCapturing = true;
-  overlayWindow.webContents.send('ocr-status', captureMessage);
+  overlayWindow.webContents.send('ocr-status', 'Running query...');
 
   try {
     const activeSettings = cloneCaptureSettings(captureSettings);
-    const capture = await captureFn();
     let extractedText = '';
     let ocrConfidence: number | null = null;
 
@@ -1117,7 +1066,7 @@ async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captu
     const taskProvider = providerLabel(activeSettings.taskLlm.provider);
     try {
       overlayWindow.webContents.send('ocr-status', `Running task LLM via ${taskProvider}...`);
-      taskText = await runLlmTask(extractedText, activeSettings.taskLlm);
+      taskText = await runLlmTask(extractedText, activeSettings.taskLlm, normalizedQuery);
     } catch (llmError) {
       const llmErrorMessage = llmError instanceof Error ? llmError.message : String(llmError);
       const hasExtractedText = Boolean(extractedText.trim());
@@ -1147,6 +1096,32 @@ async function runCapturePipeline(captureFn: () => Promise<CaptureResult>, captu
       confidence: null,
       error: errorMessage,
     });
+    overlayWindow.webContents.send('ocr-status', 'Error during query');
+    return false;
+  } finally {
+    isCapturing = false;
+  }
+}
+
+async function captureForQuery(captureFn: () => Promise<CaptureResult>, captureMessage: string): Promise<boolean> {
+  if (isCapturing || !overlayWindow || overlayWindow.isDestroyed()) {
+    return false;
+  }
+
+  isCapturing = true;
+  overlayWindow.webContents.send('ocr-status', captureMessage);
+
+  try {
+    latestCapture = await captureFn();
+    overlayWindow.webContents.send('ocr-status', 'Screenshot captured. Type a query and press Enter to send.');
+    return true;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    overlayWindow.webContents.send('ocr-result', {
+      text: '',
+      confidence: null,
+      error: errorMessage,
+    });
     overlayWindow.webContents.send('ocr-status', 'Error during capture');
     return false;
   } finally {
@@ -1167,6 +1142,7 @@ function hideOverlay(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   clearSelectionContext();
   setOverlayInteractivity(false);
+  latestCapture = null;
   overlayWindow.hide();
 }
 
@@ -1193,7 +1169,8 @@ function toggleOverlayAndCapture(): void {
   }
 
   showOverlayForCapture();
-  void runCapturePipeline(captureAroundCursor, 'Capturing screen...');
+  latestCapture = null;
+  void captureForQuery(captureAroundCursor, 'Capturing screen...');
 }
 
 function startRegionSelection(): void {
@@ -1250,6 +1227,25 @@ function registerOverlayIpc(): void {
 
   ipcMain.handle('overlay:get-screenshot-exclusion', () => {
     return hideOverlayFromScreenshots;
+  });
+
+  ipcMain.handle('overlay:submit-query', async (_event, query: unknown) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return false;
+    }
+
+    const normalizedQuery = typeof query === 'string' ? query.trim() : '';
+    if (!normalizedQuery) {
+      overlayWindow.webContents.send('ocr-status', 'Enter a query before sending.');
+      return false;
+    }
+
+    if (!latestCapture) {
+      overlayWindow.webContents.send('ocr-status', 'No screenshot captured yet. Press the capture hotkey first.');
+      return false;
+    }
+
+    return runCapturePipeline(latestCapture, normalizedQuery);
   });
 }
 
@@ -1567,6 +1563,7 @@ app.on('will-quit', () => {
   ipcMain.removeHandler('overlay:update-settings');
   ipcMain.removeHandler('overlay:set-screenshot-exclusion');
   ipcMain.removeHandler('overlay:get-screenshot-exclusion');
+  ipcMain.removeHandler('overlay:submit-query');
   ipcMain.removeAllListeners('overlay:hide-console');
 
   // Fire-and-forget — Electron does not await async will-quit handlers.

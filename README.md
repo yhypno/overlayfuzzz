@@ -3,12 +3,13 @@
 Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's approach (overlay window + OCR + global input hooks).
 
 ## What it does
-- Press `Ctrl/Cmd + Shift + O` to show a transparent overlay and capture around your cursor.
+- Press `Ctrl/Cmd + Shift + O` to show the overlay and capture a full-display screenshot.
 - Press `Ctrl/Cmd + Shift + R` to trigger the secondary capture hotkey. Right now it mirrors the quick capture flow rather than opening a drag-to-select region tool.
-- Default pipeline is screenshot -> LLM.
+- After capture, type a query in the chat-style input and press `Enter` to run the LLM pipeline.
+- Default pipeline is screenshot capture -> extraction -> task LLM.
 - OCR is optional and can be enabled from Settings to augment prompts before the LLM call.
 - Supported LLM providers: OpenRouter, Ollama, OpenAI, Anthropic, Gemini.
-- Overlay UI shows LLM output, OCR confidence (when OCR is enabled), status, and error state.
+- Overlay UI shows LLM output, a query composer, OCR confidence (when OCR is enabled), status, and error state.
 - Press the active hotkey again to hide the overlay.
 - Press `Esc` while the overlay is focused to hide it, or `Ctrl/Cmd + ,` to open the overlay settings page.
 - Settings now include `Hide overlay in screenshots`, which toggles whether the overlay window is excluded from OS/app screenshots.
@@ -56,7 +57,6 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 - Overlay attachment by target window is opt-in. To enable it, set both:
   - `OVERLAY_FUZZ_ATTACH_TO_TARGET=1`
   - `OVERLAY_FUZZ_TARGET_WINDOW_TITLE="<target window title>"`
-- Adjust quick OCR capture size in `src/main.ts` via `CAPTURE_SIZE`.
 - OCR worker looks for OCR files in this order:
   - `OVERLAY_FUZZ_TESS_CORE_PATH` / `OVERLAY_FUZZ_TRAINEDDATA_PATH`
   - `./cv-ocr/`
