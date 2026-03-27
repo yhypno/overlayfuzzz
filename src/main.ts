@@ -484,14 +484,21 @@ function buildImagePrompt(prompt: string): string {
   return prompt.trim() || DEFAULT_CAPTURE_SETTINGS.imageLlm.prompt;
 }
 
-function buildTaskPrompt(instruction: string, extractedText: string): string {
-  const basePrompt = instruction.trim() || DEFAULT_CAPTURE_SETTINGS.taskLlm.prompt;
-  const normalizedText = extractedText.trim();
-  if (!normalizedText) {
-    return basePrompt;
+function buildTaskPrompt(configuredPrompt: string, instruction: string, extractedText: string): string {
+  const basePrompt = configuredPrompt.trim() || DEFAULT_CAPTURE_SETTINGS.taskLlm.prompt;
+  const userInstruction = instruction.trim();
+  const promptParts = [basePrompt];
+
+  if (userInstruction) {
+    promptParts.push(`User query:\n${userInstruction}`);
   }
 
-  return `${basePrompt}\n\nExtracted text:\n${normalizedText}`;
+  const normalizedText = extractedText.trim();
+  if (normalizedText) {
+    promptParts.push(`Extracted text:\n${normalizedText}`);
+  }
+
+  return promptParts.join('\n\n');
 }
 
 function ensureApiKey(provider: LlmProvider, apiKey: string): void {
@@ -745,7 +752,7 @@ async function runLlmImageExtraction(imageBuffer: Buffer, settings: LlmRoleSetti
 async function runLlmTask(extractedText: string, settings: LlmRoleSettings, taskInstruction: string): Promise<string> {
   const provider = settings.provider;
   const providerConfig = settings.config;
-  const prompt = buildTaskPrompt(taskInstruction, extractedText);
+  const prompt = buildTaskPrompt(settings.prompt, taskInstruction, extractedText);
 
   if (provider === 'openrouter') {
     return requestOpenAiCompatible(provider, providerConfig, prompt, undefined, {
