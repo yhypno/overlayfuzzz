@@ -17,6 +17,7 @@ interface OverlayApi {
   onResult(callback: (payload: OverlayResultPayload) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
   hideOverlay(): void;
+  submitQuery?(query: string): Promise<boolean>;
 }
 
 declare global {

@@ -53,4 +53,5 @@ export interface OverlayApi {
   updateSettings(settings: CaptureSettings): Promise<CaptureSettings>;
   setScreenshotExclusion(enabled: boolean): Promise<boolean>;
   getScreenshotExclusion(): Promise<boolean>;
+  submitQuery(query: string): Promise<boolean>;
 }

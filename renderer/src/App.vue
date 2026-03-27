@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppTitlebar from './components/AppTitlebar.vue';
 import type { CaptureSettings, LlmProvider, OverlayModePayload, OverlayResult } from './types/overlay';
 
@@ -23,14 +23,17 @@ const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'gemini', label: 'Gemini' },
 ];
 
-const status = ref('Press Ctrl/Cmd + Shift + O for quick capture. Ctrl/Cmd + Shift + R mirrors quick capture.');
-const result = ref('Waiting for Task LLM output...');
+const status = ref('Press Ctrl/Cmd + Shift + O to capture, then type a query and press Enter to send.');
+const result = ref('Capture a screenshot, type your query, and press Enter.');
 const confidence = ref<number | null>(null);
 const error = ref('');
 const bridgeReady = ref(false);
 const lastUpdate = ref('Idle');
 const quickHotkey = ref('Ctrl/Cmd + Shift + O');
 const regionHotkey = ref('Ctrl/Cmd + Shift + R');
+const queryInputEl = ref<HTMLInputElement | null>(null);
+const queryText = ref('');
+const querySubmitting = ref(false);
 const activePage = ref<Page>('console');
 const settingsError = ref('');
 const settingsNotice = ref('');
@@ -129,9 +132,9 @@ const stage = computed<Stage>(() => {
   if (error.value) return 'error';
 
   const text = `${status.value} ${lastUpdate.value}`.toLowerCase();
-  if (text.includes('captur')) return 'capturing';
+  if (text.includes('capturing')) return 'capturing';
   if (text.includes('running') || text.includes('process') || text.includes('extract')) return 'processing';
-  if (text.includes('done') || text.includes('complete')) return 'done';
+  if (text.includes('screenshot captured') || text.includes('done') || text.includes('complete')) return 'done';
   return 'idle';
 });
 
@@ -193,6 +196,12 @@ function setResult(payload: OverlayResult) {
 function setStatus(value: string) {
   status.value = value;
   lastUpdate.value = value;
+  if (value.toLowerCase().includes('screenshot captured')) {
+    void nextTick(() => {
+      queryInputEl.value?.focus();
+      queryInputEl.value?.select();
+    });
+  }
 }
 
 function applyMode(payload: OverlayModePayload) {
@@ -342,6 +351,36 @@ async function hideConsole() {
   }
 }
 
+async function submitQueryFromComposer() {
+  if (querySubmitting.value) {
+    return;
+  }
+
+  const normalized = queryText.value.trim();
+  if (!normalized) {
+    setStatus('Enter a query before sending.');
+    return;
+  }
+
+  if (!window.overlayApi?.submitQuery) {
+    setStatus('Bridge unavailable. Unable to send query.');
+    return;
+  }
+
+  querySubmitting.value = true;
+  try {
+    const submitted = await window.overlayApi.submitQuery(normalized);
+    if (submitted) {
+      queryText.value = '';
+    }
+  } catch (submitError) {
+    error.value = submitError instanceof Error ? submitError.message : String(submitError);
+    setStatus('Failed to submit query.');
+  } finally {
+    querySubmitting.value = false;
+  }
+}
+
 function onWindowKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     event.preventDefault();
@@ -407,13 +446,36 @@ onUnmounted(() => {
 
           <section class="result-panel">
             <div class="result-head">
-              <span>Detected text</span>
+              <span>Assistant output</span>
               <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
             </div>
             <Transition v-if="preferences.animateTextUpdates" name="fade-swap" mode="out-in">
               <pre :key="result" class="result-output">{{ result }}</pre>
             </Transition>
             <pre v-else class="result-output">{{ result }}</pre>
+          </section>
+
+          <section class="composer-panel">
+            <div class="composer-row">
+              <input
+                ref="queryInputEl"
+                class="composer-input"
+                type="text"
+                v-model="queryText"
+                placeholder="Type query and press Enter"
+                :disabled="querySubmitting || !bridgeReady"
+                @keydown.enter.prevent="submitQueryFromComposer"
+              />
+              <button
+                type="button"
+                class="composer-send"
+                :disabled="querySubmitting || !bridgeReady || !queryText.trim()"
+                @click="submitQueryFromComposer"
+              >
+                {{ querySubmitting ? 'Sending...' : 'Send' }}
+              </button>
+            </div>
+            <p class="composer-hint">Capture first with {{ quickHotkey }} or {{ regionHotkey }}, then press Enter to send.</p>
           </section>
 
           <section class="metrics-row" :class="{ single: !preferences.showConfidenceMeter }">
@@ -429,8 +491,9 @@ onUnmounted(() => {
           </section>
 
           <footer class="console-footer" v-if="preferences.showFooterHints">
-            <span>{{ quickHotkey }}</span>
-            <span>{{ regionHotkey }} (mirrors quick capture)</span>
+            <span>Capture: {{ quickHotkey }}</span>
+            <span>Alt Capture: {{ regionHotkey }}</span>
+            <span>Send: Enter</span>
             <span>{{ ocrModeLabel }}</span>
             <span>{{ llmPipelineLabel }}</span>
             <span>{{ lastUpdate }}</span>
@@ -600,23 +663,27 @@ onUnmounted(() => {
 
 .console-body {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  gap: 8px;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  gap: 6px;
   height: calc(100% - 47px);
-  padding: 0.45rem;
+  padding: 0.36rem;
 }
 
 .compact .console-body {
-  gap: 6px;
-  padding: 0.35rem;
+  gap: 4px;
+  padding: 0.28rem;
 }
 
 .status-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.45rem;
   min-width: 0;
-  font-size: 0.68rem;
+  font-size: 0.64rem;
+  border: 1px solid rgba(55, 65, 81, 0.95);
+  border-radius: 0.22rem;
+  background: rgba(15, 23, 42, 0.84);
+  padding: 0.25rem 0.38rem;
 }
 
 .status-label {
@@ -636,11 +703,11 @@ onUnmounted(() => {
 .status-stage {
   margin-left: auto;
   border: 1px solid rgba(75, 85, 99, 1);
-  border-radius: 999px;
-  background: rgba(31, 41, 55, 1);
-  padding: 0 0.45rem;
-  line-height: 1.15rem;
-  font-size: 0.54rem;
+  border-radius: 0.2rem;
+  background: rgba(30, 41, 59, 1);
+  padding: 0.05rem 0.35rem;
+  line-height: 1.05rem;
+  font-size: 0.52rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: rgba(156, 163, 175, 1);
@@ -652,7 +719,7 @@ onUnmounted(() => {
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.3rem;
+  border-radius: 0.22rem;
   background: rgba(17, 24, 39, 0.9);
   overflow: hidden;
 }
@@ -664,8 +731,8 @@ onUnmounted(() => {
   gap: 0.5rem;
   border-bottom: 1px solid rgba(55, 65, 81, 1);
   background: rgba(31, 41, 55, 0.6);
-  padding: 0.34rem 0.45rem;
-  font-size: 0.56rem;
+  padding: 0.3rem 0.42rem;
+  font-size: 0.52rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: rgba(148, 163, 184, 1);
@@ -675,19 +742,74 @@ onUnmounted(() => {
   margin: 0;
   min-height: 0;
   overflow: auto;
-  padding: 0.45rem;
+  padding: 0.4rem;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.78rem;
-  line-height: 1.36;
+  font-size: 0.74rem;
+  line-height: 1.34;
   color: rgba(243, 244, 246, 1);
   font-family: 'SFMono-Regular', Consolas, Monaco, monospace;
+}
+
+.composer-panel {
+  border: 1px solid rgba(55, 65, 81, 1);
+  border-radius: 0.22rem;
+  background: rgba(17, 24, 39, 0.92);
+  padding: 0.32rem 0.36rem;
+  display: grid;
+  gap: 0.24rem;
+}
+
+.composer-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.34rem;
+  align-items: center;
+}
+
+.composer-input {
+  border: 1px solid rgba(71, 85, 105, 0.9);
+  border-radius: 0.2rem;
+  background: rgba(15, 23, 42, 0.95);
+  color: rgba(229, 231, 235, 1);
+  font-size: 0.74rem;
+  padding: 0.4rem 0.5rem;
+  min-width: 0;
+}
+
+.composer-input::placeholder {
+  color: rgba(148, 163, 184, 0.92);
+}
+
+.composer-send {
+  border: 1px solid rgba(56, 189, 248, 0.6);
+  border-radius: 0.2rem;
+  background: rgba(14, 116, 144, 0.5);
+  color: rgba(224, 242, 254, 1);
+  font-size: 0.64rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.38rem 0.58rem;
+}
+
+.composer-send:disabled,
+.composer-input:disabled {
+  opacity: 0.58;
+  cursor: default;
+}
+
+.composer-hint {
+  margin: 0;
+  font-size: 0.54rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 1);
 }
 
 .metrics-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .metrics-row.single {
@@ -696,9 +818,9 @@ onUnmounted(() => {
 
 .metric-chip {
   border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.3rem;
+  border-radius: 0.22rem;
   background: rgba(17, 24, 39, 0.9);
-  padding: 0.34rem 0.45rem;
+  padding: 0.3rem 0.4rem;
   display: grid;
   gap: 0.22rem;
 }
@@ -711,7 +833,7 @@ onUnmounted(() => {
 }
 
 .metric-value {
-  font-size: 1.05rem;
+  font-size: 0.96rem;
   font-weight: 600;
   line-height: 1.1;
   color: rgba(229, 231, 235, 1);
@@ -734,7 +856,7 @@ onUnmounted(() => {
 }
 
 .metric-error {
-  font-size: 0.66rem;
+  font-size: 0.62rem;
   line-height: 1.3;
   color: rgba(229, 231, 235, 1);
   min-height: 2.1rem;
@@ -745,20 +867,24 @@ onUnmounted(() => {
 .console-footer {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 0.55rem;
+  gap: 0.3rem 0.45rem;
   margin: 0;
-  font-size: 0.56rem;
+  font-size: 0.5rem;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: rgba(148, 163, 184, 1);
 }
 
 .settings-view {
   height: calc(100% - 47px);
   padding: 0.6rem;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.75rem;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.48rem;
 }
 
 .settings-head h2 {
@@ -779,7 +905,7 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.7rem;
-  overflow: auto;
+  overflow: visible;
 }
 
 .settings-panel {
@@ -951,12 +1077,12 @@ onUnmounted(() => {
 }
 
 .widget-default-style {
-  border-radius: 0.3rem;
+  border-radius: 0.22rem;
   background: rgba(17, 24, 39, 0.95);
   border: 1px solid rgba(51, 65, 85, 0.8);
   box-shadow:
-    0 6px 16px rgba(2, 6, 23, 0.6),
-    0 2px 6px rgba(2, 6, 23, 0.55);
+    0 4px 12px rgba(2, 6, 23, 0.55),
+    0 1px 4px rgba(2, 6, 23, 0.5);
 }
 
 .fade-swap-enter-active,
@@ -975,6 +1101,14 @@ onUnmounted(() => {
 @media (max-width: 720px) {
   .metrics-row {
     grid-template-columns: 1fr;
+  }
+
+  .composer-row {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-send {
+    width: 100%;
   }
 
   .settings-grid {

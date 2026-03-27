@@ -48,4 +48,7 @@ contextBridge.exposeInMainWorld('overlayApi', {
   getScreenshotExclusion: async (): Promise<boolean> => {
     return ipcRenderer.invoke('overlay:get-screenshot-exclusion');
   },
+  submitQuery: async (query: string): Promise<boolean> => {
+    return ipcRenderer.invoke('overlay:submit-query', query);
+  },
 });
