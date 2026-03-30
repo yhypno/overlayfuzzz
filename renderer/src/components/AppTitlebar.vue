@@ -40,87 +40,78 @@ const emit = defineEmits<{
 
 <style scoped>
 .titlebar {
-  background: rgba(17, 24, 39, 1);
-  color: rgba(107, 114, 128, 1);
   display: flex;
   justify-content: space-between;
   align-items: center;
-  height: 1.5rem;
-  line-height: 1.5rem;
-  border-bottom: 1px solid rgba(55, 65, 81, 1);
-  padding: 0 0.2rem;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid #2b2b2b;
+  background: #171717;
+  color: #d7d7d7;
 }
 
 .titlebar-left {
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  min-width: 0;
-}
-
-.titlebar-nav {
-  display: flex;
-  gap: 0.22rem;
+  gap: 10px;
 }
 
 .titlebar-main,
 .titlebar-close,
 .titlebar-nav-btn {
   border: none;
-  background: transparent;
   color: inherit;
-  height: 1.2rem;
-  line-height: 1.2rem;
-  border-radius: 0.22rem;
-}
-
-.titlebar-main,
-.titlebar-close {
-  padding: 0 0.5rem;
+  background: transparent;
+  border-radius: 6px;
+  font: inherit;
 }
 
 .titlebar-main {
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.66rem;
-  max-width: 10rem;
+  min-width: 0;
+  max-width: 170px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 6px;
+}
+
+.titlebar-nav {
+  display: flex;
+  gap: 4px;
 }
 
 .titlebar-nav-btn {
-  font-size: 0.56rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  padding: 0 0.42rem;
-  border: 1px solid transparent;
+  font-size: 12px;
+  color: #adadad;
+  padding: 4px 8px;
 }
 
 .titlebar-nav-btn.active {
-  color: rgba(229, 231, 235, 1);
-  border-color: rgba(75, 85, 99, 1);
-  background: rgba(31, 41, 55, 0.85);
+  color: #ececec;
+  background: #212121;
 }
 
 .titlebar-close {
-  width: 1.5rem;
-  font-size: 0.9rem;
+  width: 28px;
+  height: 28px;
+  font-size: 18px;
   line-height: 1;
-  border-radius: 0.2rem;
   padding: 0;
 }
 
 .titlebar-main:hover,
-.titlebar-close:hover,
 .titlebar-nav-btn:hover {
-  color: rgba(156, 163, 175, 1);
-  background: linear-gradient(to top, rgba(17, 24, 39, 1), rgba(55, 65, 81, 1));
+  background: #1d1d1d;
+  color: #ececec;
 }
 
 .titlebar-close:hover {
-  color: rgba(254, 202, 202, 1);
-  background: rgba(239, 68, 68, 0.95);
+  background: #3a2424;
+  color: #f0d4d4;
 }
 
 .drag-region {
