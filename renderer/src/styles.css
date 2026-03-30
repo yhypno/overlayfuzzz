@@ -5,10 +5,11 @@
 :root {
   color-scheme: dark;
   font-family:
-    'Segoe UI',
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
+    'IBM Plex Sans',
+    'SF Pro Text',
+    'Noto Sans',
+    'Helvetica Neue',
+    'Liberation Sans',
     sans-serif;
   background: transparent;
 }
@@ -24,12 +25,12 @@ body,
 }
 
 body {
-  color: rgba(248, 250, 252, 0.96);
+  color: #ececec;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: rgba(71, 232, 194, 0.28);
+  background: rgba(122, 155, 138, 0.42);
   color: #ffffff;
 }

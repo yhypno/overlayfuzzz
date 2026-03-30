@@ -23,8 +23,8 @@ const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'gemini', label: 'Gemini' },
 ];
 
-const status = ref('Press Ctrl/Cmd + Shift + O to capture, then type a query and press Enter to send.');
-const result = ref('Capture a screenshot, type your query, and press Enter.');
+const status = ref('Press Ctrl/Cmd + Shift + O to capture.');
+const result = ref('Waiting for capture.');
 const confidence = ref<number | null>(null);
 const error = ref('');
 const bridgeReady = ref(false);
@@ -166,15 +166,7 @@ const llmPipelineLabel = computed(() =>
     ? `Task LLM: ${taskProviderLabel.value}`
     : `Image LLM: ${imageProviderLabel.value} -> Task LLM: ${taskProviderLabel.value}`,
 );
-
-const confidenceValue = computed(() =>
-  confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`,
-);
-
-const confidenceWidth = computed(() => {
-  const raw = confidence.value ?? 0;
-  return `${Math.max(0, Math.min(100, raw))}%`;
-});
+const confidenceValue = computed(() => (confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`));
 
 function prettifyHotkey(value?: string) {
   if (!value) return '';
@@ -264,7 +256,7 @@ async function saveCaptureSettings(): Promise<boolean> {
 }
 
 async function persistCaptureSettingsBeforeLeavingSettings(): Promise<boolean> {
-  if (activePage.value !== 'settings' || !captureSettingsDirty.value || settingsSaving.value) {
+  if (!captureSettingsDirty.value || settingsSaving.value) {
     return true;
   }
 
@@ -425,104 +417,77 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative h-screen w-screen overflow-hidden bg-transparent text-white">
-    <main id="overlay-window" class="relative h-full w-full overflow-hidden">
-      <div class="overlay-bg" />
-      <section class="console-shell widget-default-style" :class="shellClass">
-        <AppTitlebar
-          title="OCR Console"
-          :active-page="activePage"
-          @console="openConsolePage"
-          @settings="openSettingsPage"
-          @close="closeOverlayFromUi"
-        />
+  <div class="app-root">
+    <section class="app-shell" :class="shellClass">
+      <AppTitlebar
+        title="OverlayFuzz"
+        :active-page="activePage"
+        @console="openConsolePage"
+        @settings="openSettingsPage"
+        @close="closeOverlayFromUi"
+      />
 
-        <div class="console-body no-drag" v-if="activePage === 'console'">
-          <div class="status-row">
-            <span class="status-label">Status</span>
-            <span class="status-value">{{ status }}</span>
-            <span class="status-stage">{{ stageLabel }}</span>
-          </div>
-
-          <section class="result-panel">
-            <div class="result-head">
-              <span>Assistant output</span>
-              <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
-            </div>
-            <Transition v-if="preferences.animateTextUpdates" name="fade-swap" mode="out-in">
-              <pre :key="result" class="result-output">{{ result }}</pre>
-            </Transition>
-            <pre v-else class="result-output">{{ result }}</pre>
-          </section>
-
-          <section class="composer-panel">
-            <div class="composer-row">
-              <input
-                ref="queryInputEl"
-                class="composer-input"
-                type="text"
-                v-model="queryText"
-                placeholder="Type query and press Enter"
-                :disabled="querySubmitting || !bridgeReady"
-                @keydown.enter.prevent="submitQueryFromComposer"
-              />
-              <button
-                type="button"
-                class="composer-send"
-                :disabled="querySubmitting || !bridgeReady || !queryText.trim()"
-                @click="submitQueryFromComposer"
-              >
-                {{ querySubmitting ? 'Sending...' : 'Send' }}
-              </button>
-            </div>
-            <p class="composer-hint">Capture first with {{ quickHotkey }} or {{ regionHotkey }}, then press Enter to send.</p>
-          </section>
-
-          <section class="metrics-row" :class="{ single: !preferences.showConfidenceMeter }">
-            <div class="metric-chip" v-if="preferences.showConfidenceMeter">
-              <span class="metric-label">Confidence</span>
-              <span class="metric-value">{{ confidenceValue }}</span>
-              <span class="metric-meter"><span :style="{ width: confidenceWidth }" /></span>
-            </div>
-            <div class="metric-chip">
-              <span class="metric-label">Error</span>
-              <span class="metric-error">{{ error || 'No errors reported.' }}</span>
-            </div>
-          </section>
-
-          <footer class="console-footer" v-if="preferences.showFooterHints">
-            <span>Capture: {{ quickHotkey }}</span>
-            <span>Alt Capture: {{ regionHotkey }}</span>
-            <span>Send: Enter</span>
-            <span>{{ ocrModeLabel }}</span>
-            <span>{{ llmPipelineLabel }}</span>
-            <span>{{ lastUpdate }}</span>
-          </footer>
+      <div v-if="activePage === 'console'" class="console-view no-drag">
+        <div class="status-row">
+          <span class="status-text">{{ status }}</span>
+          <span class="status-chip">{{ stageLabel }}</span>
         </div>
 
-        <section v-else class="settings-view no-drag">
-          <div class="settings-head">
-            <h2>Settings</h2>
-            <p>Configure screenshot pipeline, LLM provider, and UI preferences.</p>
-          </div>
+        <section class="result-panel">
+          <Transition v-if="preferences.animateTextUpdates" name="fade-swap" mode="out-in">
+            <pre :key="result" class="result-output">{{ result }}</pre>
+          </Transition>
+          <pre v-else class="result-output">{{ result }}</pre>
+        </section>
 
-          <div class="settings-grid">
-            <div class="settings-panel">
-              <h3>Capture + LLM</h3>
+        <div class="query-row">
+          <input
+            ref="queryInputEl"
+            class="query-input"
+            type="text"
+            v-model="queryText"
+            placeholder="Query"
+            :disabled="querySubmitting || !bridgeReady"
+            @keydown.enter.prevent="submitQueryFromComposer"
+          />
+          <button
+            type="button"
+            class="send-button"
+            :disabled="querySubmitting || !bridgeReady || !queryText.trim()"
+            @click="submitQueryFromComposer"
+          >
+            {{ querySubmitting ? 'Sending' : 'Send' }}
+          </button>
+        </div>
 
-              <label class="settings-item">
-                <span>Use OCR before LLM</span>
-                <input type="checkbox" v-model="captureSettings.useOcr" />
-              </label>
+        <div class="meta-row">
+          <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
+          <span v-if="preferences.showConfidenceMeter">Confidence {{ confidenceValue }}</span>
+          <span v-if="error" class="meta-error">{{ error }}</span>
+        </div>
 
-              <p class="settings-note" v-if="captureSettings.useOcr">
-                OCR is the extraction step. Only Task LLM is used.
-              </p>
+        <footer class="footer-row" v-if="preferences.showFooterHints">
+          <span>Quick {{ quickHotkey }}</span>
+          <span>Region {{ regionHotkey }}</span>
+          <span>{{ ocrModeLabel }}</span>
+          <span>{{ llmPipelineLabel }}</span>
+        </footer>
+      </div>
 
-              <div class="llm-role" v-if="!captureSettings.useOcr">
-                <h4>Image LLM (Extraction)</h4>
+      <section v-else class="settings-view no-drag">
+        <div class="settings-grid">
+          <div class="settings-panel">
+            <h2>Capture</h2>
 
-                <label class="settings-item">
+            <label class="toggle-row">
+              <span>Use OCR first</span>
+              <input type="checkbox" v-model="captureSettings.useOcr" />
+            </label>
+
+            <section class="role-group" v-if="!captureSettings.useOcr">
+              <h3>Image model</h3>
+              <div class="field-grid">
+                <label class="field">
                   <span>Provider</span>
                   <select v-model="captureSettings.imageLlm.provider" @change="applyProviderDefaults('imageLlm')">
                     <option v-for="option in PROVIDER_OPTIONS" :key="option.value" :value="option.value">
@@ -531,31 +496,32 @@ onUnmounted(() => {
                   </select>
                 </label>
 
-                <label class="settings-item">
+                <label class="field">
                   <span>Model</span>
                   <input type="text" v-model="captureSettings.imageLlm.config.model" />
                 </label>
 
-                <label class="settings-item">
+                <label class="field field-full">
                   <span>Base URL</span>
                   <input type="text" v-model="captureSettings.imageLlm.config.baseUrl" />
                 </label>
 
-                <label class="settings-item" v-if="captureSettings.imageLlm.provider !== 'ollama'">
+                <label class="field field-full" v-if="captureSettings.imageLlm.provider !== 'ollama'">
                   <span>API key</span>
                   <input type="password" v-model="captureSettings.imageLlm.config.apiKey" />
                 </label>
-
-                <label class="settings-item settings-item-column">
-                  <span>Image prompt</span>
-                  <textarea rows="4" v-model="captureSettings.imageLlm.prompt" />
-                </label>
               </div>
 
-              <div class="llm-role">
-                <h4>Task LLM</h4>
+              <label class="field field-full">
+                <span>Prompt</span>
+                <textarea rows="4" v-model="captureSettings.imageLlm.prompt"></textarea>
+              </label>
+            </section>
 
-                <label class="settings-item">
+            <section class="role-group">
+              <h3>Task model</h3>
+              <div class="field-grid">
+                <label class="field">
                   <span>Provider</span>
                   <select v-model="captureSettings.taskLlm.provider" @change="applyProviderDefaults('taskLlm')">
                     <option v-for="option in PROVIDER_OPTIONS" :key="option.value" :value="option.value">
@@ -564,492 +530,412 @@ onUnmounted(() => {
                   </select>
                 </label>
 
-                <label class="settings-item">
+                <label class="field">
                   <span>Model</span>
                   <input type="text" v-model="captureSettings.taskLlm.config.model" />
                 </label>
 
-                <label class="settings-item">
+                <label class="field field-full">
                   <span>Base URL</span>
                   <input type="text" v-model="captureSettings.taskLlm.config.baseUrl" />
                 </label>
 
-                <label class="settings-item" v-if="captureSettings.taskLlm.provider !== 'ollama'">
+                <label class="field field-full" v-if="captureSettings.taskLlm.provider !== 'ollama'">
                   <span>API key</span>
                   <input type="password" v-model="captureSettings.taskLlm.config.apiKey" />
                 </label>
-
-                <label class="settings-item settings-item-column">
-                  <span>Task prompt</span>
-                  <textarea rows="4" v-model="captureSettings.taskLlm.prompt" />
-                </label>
               </div>
 
-              <div class="settings-actions">
-                <button type="button" @click="saveCaptureSettings" :disabled="settingsSaving">
-                  {{ settingsSaving ? 'Saving...' : 'Save LLM Settings' }}
-                </button>
-                <span v-if="settingsNotice" class="settings-notice">{{ settingsNotice }}</span>
-              </div>
-              <p v-if="settingsError" class="settings-error">{{ settingsError }}</p>
+              <label class="field field-full">
+                <span>Prompt</span>
+                <textarea rows="4" v-model="captureSettings.taskLlm.prompt"></textarea>
+              </label>
+            </section>
+
+            <div class="settings-actions">
+              <button type="button" class="save-button" @click="saveCaptureSettings" :disabled="settingsSaving">
+                {{ settingsSaving ? 'Saving' : 'Save' }}
+              </button>
+              <span v-if="settingsNotice" class="settings-notice">{{ settingsNotice }}</span>
             </div>
-
-            <div class="settings-panel">
-              <h3>UI Preferences</h3>
-
-              <label class="settings-item">
-                <span>Compact layout</span>
-                <input type="checkbox" v-model="preferences.compactLayout" />
-              </label>
-
-              <label class="settings-item">
-                <span>Show confidence meter</span>
-                <input type="checkbox" v-model="preferences.showConfidenceMeter" />
-              </label>
-
-              <label class="settings-item">
-                <span>Show footer hints</span>
-                <input type="checkbox" v-model="preferences.showFooterHints" />
-              </label>
-
-              <label class="settings-item">
-                <span>Animate result updates</span>
-                <input type="checkbox" v-model="preferences.animateTextUpdates" />
-              </label>
-
-              <label class="settings-item">
-                <span>Hide overlay in screenshots</span>
-                <input type="checkbox" v-model="preferences.hideFromScreenshots" />
-              </label>
-            </div>
+            <p v-if="settingsError" class="settings-error">{{ settingsError }}</p>
           </div>
 
-          <div class="settings-shortcuts">
-            <div>
-              <span>Quick Capture</span>
-              <strong>{{ quickHotkey }}</strong>
-            </div>
-            <div>
-              <span>Region Capture</span>
-              <strong>{{ regionHotkey }}</strong>
-            </div>
-            <div>
-              <span>Open Settings</span>
-              <strong>Ctrl/Cmd + ,</strong>
+          <div class="settings-panel">
+            <h2>Interface</h2>
+
+            <label class="toggle-row">
+              <span>Compact layout</span>
+              <input type="checkbox" v-model="preferences.compactLayout" />
+            </label>
+
+            <label class="toggle-row">
+              <span>Show confidence</span>
+              <input type="checkbox" v-model="preferences.showConfidenceMeter" />
+            </label>
+
+            <label class="toggle-row">
+              <span>Show hotkeys</span>
+              <input type="checkbox" v-model="preferences.showFooterHints" />
+            </label>
+
+            <label class="toggle-row">
+              <span>Animate output updates</span>
+              <input type="checkbox" v-model="preferences.animateTextUpdates" />
+            </label>
+
+            <label class="toggle-row">
+              <span>Hide in screenshots</span>
+              <input type="checkbox" v-model="preferences.hideFromScreenshots" />
+            </label>
+
+            <div class="settings-meta">
+              <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
+              <span>{{ ocrModeLabel }}</span>
+              <span>{{ llmPipelineLabel }}</span>
             </div>
           </div>
-        </section>
+        </div>
+
+        <div class="shortcuts-panel">
+          <div>
+            <span>Quick</span>
+            <strong>{{ quickHotkey }}</strong>
+          </div>
+          <div>
+            <span>Region</span>
+            <strong>{{ regionHotkey }}</strong>
+          </div>
+          <div>
+            <span>Settings</span>
+            <strong>Ctrl/Cmd + ,</strong>
+          </div>
+        </div>
       </section>
-    </main>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.overlay-bg {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at 82% 8%, rgba(59, 130, 246, 0.15), rgba(2, 6, 23, 0.32) 38%, rgba(2, 6, 23, 0.62));
-  pointer-events: none;
+.app-root {
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  box-sizing: border-box;
 }
 
-.console-shell {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: calc(100% - 16px);
-  height: calc(100% - 16px);
+.app-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+  border: 1px solid #2f2f2f;
+  border-radius: 8px;
+  background: #151515;
+  transition: border-color 0.14s ease;
 }
 
-.console-body {
+.console-view {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto auto;
-  gap: 6px;
-  height: calc(100% - 47px);
-  padding: 0.36rem;
+  gap: 8px;
+  padding: 10px;
 }
 
-.compact .console-body {
-  gap: 4px;
-  padding: 0.28rem;
+.compact .console-view {
+  padding: 8px;
+  gap: 6px;
 }
 
 .status-row {
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 8px;
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #101010;
+  padding: 7px 10px;
+}
+
+.status-text {
   min-width: 0;
-  font-size: 0.64rem;
-  border: 1px solid rgba(55, 65, 81, 0.95);
-  border-radius: 0.22rem;
-  background: rgba(15, 23, 42, 0.84);
-  padding: 0.25rem 0.38rem;
-}
-
-.status-label {
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: rgba(148, 163, 184, 1);
-  flex: 0 0 auto;
-}
-
-.status-value {
-  color: rgba(229, 231, 235, 1);
   overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #d7d7d7;
 }
 
-.status-stage {
-  margin-left: auto;
-  border: 1px solid rgba(75, 85, 99, 1);
-  border-radius: 0.2rem;
-  background: rgba(30, 41, 59, 1);
-  padding: 0.05rem 0.35rem;
-  line-height: 1.05rem;
-  font-size: 0.52rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: rgba(156, 163, 175, 1);
+.status-chip {
   flex: 0 0 auto;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #bfbfbf;
+  background: #171717;
 }
 
 .result-panel {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
-  border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.22rem;
-  background: rgba(17, 24, 39, 0.9);
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #101010;
   overflow: hidden;
-}
-
-.result-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  border-bottom: 1px solid rgba(55, 65, 81, 1);
-  background: rgba(31, 41, 55, 0.6);
-  padding: 0.3rem 0.42rem;
-  font-size: 0.52rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: rgba(148, 163, 184, 1);
 }
 
 .result-output {
   margin: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
   min-height: 0;
   overflow: auto;
-  padding: 0.4rem;
+  padding: 10px;
+  color: #f0f0f0;
+  font-size: 12px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.74rem;
-  line-height: 1.34;
-  color: rgba(243, 244, 246, 1);
-  font-family: 'SFMono-Regular', Consolas, Monaco, monospace;
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
 }
 
-.composer-panel {
-  border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.22rem;
-  background: rgba(17, 24, 39, 0.92);
-  padding: 0.32rem 0.36rem;
-  display: grid;
-  gap: 0.24rem;
-}
-
-.composer-row {
+.query-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.34rem;
-  align-items: center;
+  gap: 8px;
 }
 
-.composer-input {
-  border: 1px solid rgba(71, 85, 105, 0.9);
-  border-radius: 0.2rem;
-  background: rgba(15, 23, 42, 0.95);
-  color: rgba(229, 231, 235, 1);
-  font-size: 0.74rem;
-  padding: 0.4rem 0.5rem;
+.query-input {
+  width: 100%;
   min-width: 0;
+  border: 1px solid #3d3d3d;
+  border-radius: 8px;
+  background: #111111;
+  color: #ececec;
+  font-size: 13px;
+  padding: 8px 10px;
+  box-sizing: border-box;
 }
 
-.composer-input::placeholder {
-  color: rgba(148, 163, 184, 0.92);
+.query-input::placeholder {
+  color: #8a8a8a;
 }
 
-.composer-send {
-  border: 1px solid rgba(56, 189, 248, 0.6);
-  border-radius: 0.2rem;
-  background: rgba(14, 116, 144, 0.5);
-  color: rgba(224, 242, 254, 1);
-  font-size: 0.64rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 0.38rem 0.58rem;
+.query-input:focus-visible,
+.send-button:focus-visible,
+.save-button:focus-visible,
+.field input:focus-visible,
+.field select:focus-visible,
+.field textarea:focus-visible {
+  outline: 2px solid #5f5f5f;
+  outline-offset: 0;
 }
 
-.composer-send:disabled,
-.composer-input:disabled {
-  opacity: 0.58;
+.send-button {
+  border: 1px solid #454545;
+  border-radius: 8px;
+  background: #202020;
+  color: #e9e9e9;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+}
+
+.send-button:disabled,
+.query-input:disabled,
+.save-button:disabled {
+  opacity: 0.5;
   cursor: default;
 }
 
-.composer-hint {
-  margin: 0;
-  font-size: 0.54rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: rgba(148, 163, 184, 1);
-}
-
-.metrics-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.metrics-row.single {
-  grid-template-columns: 1fr;
-}
-
-.metric-chip {
-  border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.22rem;
-  background: rgba(17, 24, 39, 0.9);
-  padding: 0.3rem 0.4rem;
-  display: grid;
-  gap: 0.22rem;
-}
-
-.metric-label {
-  font-size: 0.56rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: rgba(148, 163, 184, 1);
-}
-
-.metric-value {
-  font-size: 0.96rem;
-  font-weight: 600;
-  line-height: 1.1;
-  color: rgba(229, 231, 235, 1);
-}
-
-.metric-meter {
-  margin-top: 0.1rem;
-  width: 100%;
-  height: 0.2rem;
-  border-radius: 999px;
-  background: rgba(31, 41, 55, 1);
-  overflow: hidden;
-}
-
-.metric-meter > span {
-  display: block;
-  height: 100%;
-  background: rgba(209, 213, 219, 1);
-  transition: width 0.2s ease;
-}
-
-.metric-error {
-  font-size: 0.62rem;
-  line-height: 1.3;
-  color: rgba(229, 231, 235, 1);
-  min-height: 2.1rem;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.console-footer {
+.meta-row {
+  min-height: 16px;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.3rem 0.45rem;
-  margin: 0;
-  font-size: 0.5rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: rgba(148, 163, 184, 1);
+  gap: 8px 12px;
+  font-size: 11px;
+  color: #a7a7a7;
+}
+
+.meta-error {
+  color: #d39595;
+}
+
+.footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 11px;
+  color: #949494;
 }
 
 .settings-view {
-  height: calc(100% - 47px);
-  padding: 0.6rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 0.48rem;
-}
-
-.settings-head h2 {
-  margin: 0;
-  font-size: 0.9rem;
-  color: rgba(229, 231, 235, 1);
-}
-
-.settings-head p {
-  margin: 0.2rem 0 0;
-  font-size: 0.66rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: rgba(148, 163, 184, 1);
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  align-content: start;
 }
 
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.7rem;
-  overflow: visible;
+  gap: 10px;
 }
 
 .settings-panel {
-  border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.35rem;
-  background: rgba(17, 24, 39, 0.88);
-  overflow: hidden;
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #101010;
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.settings-panel h2,
+.settings-panel h3 {
+  margin: 0;
+  color: #ececec;
+}
+
+.settings-panel h2 {
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .settings-panel h3 {
-  margin: 0;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid rgba(55, 65, 81, 0.7);
-  font-size: 0.62rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: rgba(148, 163, 184, 1);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.settings-note {
-  margin: 0;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
-  font-size: 0.66rem;
-  color: rgba(147, 197, 253, 1);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.llm-role {
-  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
-}
-
-.llm-role h4 {
-  margin: 0;
-  padding: 0.46rem 0.6rem;
-  font-size: 0.58rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: rgba(125, 211, 252, 1);
-  background: rgba(30, 41, 59, 0.55);
-  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
-}
-
-.settings-item {
+.toggle-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid rgba(55, 65, 81, 0.6);
-  font-size: 0.72rem;
-  color: rgba(229, 231, 235, 1);
+  gap: 12px;
+  font-size: 13px;
+  color: #d7d7d7;
 }
 
-.settings-item input[type='checkbox'] {
-  accent-color: rgba(14, 165, 233, 1);
+.toggle-row input[type='checkbox'] {
+  accent-color: #5b8f79;
 }
 
-.settings-item input[type='text'],
-.settings-item input[type='password'],
-.settings-item select,
-.settings-item textarea {
-  width: min(260px, 55%);
-  border-radius: 0.25rem;
-  border: 1px solid rgba(71, 85, 105, 0.9);
-  background: rgba(15, 23, 42, 0.95);
-  color: rgba(226, 232, 240, 1);
-  font-size: 0.68rem;
-  padding: 0.3rem 0.45rem;
+.role-group {
+  border-top: 1px solid #2b2b2b;
+  padding-top: 10px;
+  display: grid;
+  gap: 8px;
 }
 
-.settings-item textarea {
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.field {
+  display: block;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #b9b9b9;
+}
+
+.field input,
+.field select,
+.field textarea {
   width: 100%;
-  min-height: 4.8rem;
-  resize: vertical;
-  margin-top: 0.35rem;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  background: #151515;
+  color: #ececec;
+  font-size: 13px;
+  padding: 8px 10px;
+  box-sizing: border-box;
 }
 
-.settings-item-column {
-  align-items: flex-start;
-  flex-direction: column;
+.field textarea {
+  resize: vertical;
+  min-height: 92px;
+}
+
+.field-full {
+  grid-column: 1 / -1;
 }
 
 .settings-actions {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.5rem 0.6rem 0.6rem;
+  gap: 8px;
 }
 
-.settings-actions button {
-  border: 1px solid rgba(56, 189, 248, 0.55);
-  background: rgba(14, 116, 144, 0.48);
-  color: rgba(224, 242, 254, 1);
-  border-radius: 0.3rem;
-  font-size: 0.66rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 0.34rem 0.55rem;
-}
-
-.settings-actions button:disabled {
-  cursor: default;
-  opacity: 0.55;
+.save-button {
+  border: 1px solid #454545;
+  border-radius: 8px;
+  background: #202020;
+  color: #ececec;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
 }
 
 .settings-notice {
-  font-size: 0.63rem;
-  color: rgba(134, 239, 172, 0.96);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  font-size: 12px;
+  color: #89b09d;
 }
 
 .settings-error {
   margin: 0;
-  padding: 0 0.6rem 0.58rem;
-  font-size: 0.66rem;
-  color: rgba(254, 202, 202, 0.96);
-  line-height: 1.3;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #d39595;
   white-space: pre-wrap;
 }
 
-.settings-shortcuts {
-  border: 1px solid rgba(55, 65, 81, 1);
-  border-radius: 0.35rem;
-  background: rgba(15, 23, 42, 0.88);
-  padding: 0.55rem 0.6rem;
+.settings-meta {
+  border-top: 1px solid #2b2b2b;
+  padding-top: 8px;
   display: grid;
-  gap: 0.34rem;
+  gap: 6px;
+  font-size: 12px;
+  color: #adadad;
 }
 
-.settings-shortcuts div {
+.shortcuts-panel {
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #101010;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.shortcuts-panel div {
   display: flex;
   justify-content: space-between;
-  gap: 0.8rem;
-  font-size: 0.66rem;
-  color: rgba(148, 163, 184, 1);
+  gap: 8px;
+  font-size: 12px;
+  color: #c1c1c1;
 }
 
-.settings-shortcuts strong {
-  color: rgba(229, 231, 235, 1);
-  font-family: 'SFMono-Regular', Consolas, Monaco, monospace;
-  font-size: 0.64rem;
+.shortcuts-panel strong {
+  color: #ececec;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-weight: 500;
 }
 
 .no-drag {
@@ -1057,72 +943,48 @@ onUnmounted(() => {
 }
 
 .stage-capturing {
-  border-color: rgba(96, 165, 250, 1);
+  border-color: #3a5145;
 }
 
 .stage-processing {
-  border-color: rgba(250, 204, 21, 1);
+  border-color: #62573d;
 }
 
 .stage-done {
-  border-color: rgba(74, 222, 128, 1);
+  border-color: #3f5b44;
 }
 
 .stage-error {
-  border-color: rgba(248, 113, 113, 1);
-}
-
-.stage-error .metric-error {
-  color: rgba(254, 205, 211, 0.96);
-}
-
-.widget-default-style {
-  border-radius: 0.22rem;
-  background: rgba(17, 24, 39, 0.95);
-  border: 1px solid rgba(51, 65, 85, 0.8);
-  box-shadow:
-    0 4px 12px rgba(2, 6, 23, 0.55),
-    0 1px 4px rgba(2, 6, 23, 0.5);
+  border-color: #6e4444;
 }
 
 .fade-swap-enter-active,
 .fade-swap-leave-active {
-  transition:
-    opacity 0.18s ease,
-    transform 0.18s ease;
+  transition: opacity 0.14s ease;
 }
 
 .fade-swap-enter-from,
 .fade-swap-leave-to {
   opacity: 0;
-  transform: translateY(8px);
 }
 
-@media (max-width: 720px) {
-  .metrics-row {
-    grid-template-columns: 1fr;
-  }
-
-  .composer-row {
-    grid-template-columns: 1fr;
-  }
-
-  .composer-send {
-    width: 100%;
-  }
-
+@media (max-width: 900px) {
   .settings-grid {
     grid-template-columns: 1fr;
   }
+}
 
-  .settings-item input[type='text'],
-  .settings-item input[type='password'],
-  .settings-item select {
-    width: 58%;
+@media (max-width: 700px) {
+  .query-row {
+    grid-template-columns: 1fr;
   }
 
-  .settings-view {
-    padding: 0.45rem;
+  .send-button {
+    width: 100%;
+  }
+
+  .field-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>
