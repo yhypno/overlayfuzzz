@@ -8,8 +8,6 @@ type Page = 'console' | 'settings';
 
 interface UiPreferences {
   compactLayout: boolean;
-  showConfidenceMeter: boolean;
-  showFooterHints: boolean;
   animateTextUpdates: boolean;
   hideFromScreenshots: boolean;
 }
@@ -23,14 +21,11 @@ const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'gemini', label: 'Gemini' },
 ];
 
-const status = ref('Press Ctrl/Cmd + Shift + O to capture.');
+const status = ref('Ready to capture.');
 const result = ref('Waiting for capture.');
-const confidence = ref<number | null>(null);
 const error = ref('');
 const bridgeReady = ref(false);
 const lastUpdate = ref('Idle');
-const quickHotkey = ref('Ctrl/Cmd + Shift + O');
-const regionHotkey = ref('Ctrl/Cmd + Shift + R');
 const queryInputEl = ref<HTMLInputElement | null>(null);
 const queryText = ref('');
 const querySubmitting = ref(false);
@@ -41,8 +36,6 @@ const settingsSaving = ref(false);
 
 const preferences = ref<UiPreferences>({
   compactLayout: false,
-  showConfidenceMeter: true,
-  showFooterHints: true,
   animateTextUpdates: true,
   hideFromScreenshots: true,
 });
@@ -69,11 +62,6 @@ function createDefaultCaptureSettings(): CaptureSettings {
       },
     },
   };
-}
-
-function providerLabel(provider: LlmProvider): string {
-  const found = PROVIDER_OPTIONS.find((option) => option.value === provider);
-  return found?.label || 'LLM';
 }
 
 function providerPreset(provider: LlmProvider) {
@@ -158,29 +146,9 @@ const shellClass = computed(() => ({
   [stageClass.value]: true,
   compact: preferences.value.compactLayout,
 }));
-const imageProviderLabel = computed(() => providerLabel(captureSettings.value.imageLlm.provider));
-const taskProviderLabel = computed(() => providerLabel(captureSettings.value.taskLlm.provider));
-const ocrModeLabel = computed(() => (captureSettings.value.useOcr ? 'OCR -> Task LLM' : 'Image LLM -> Task LLM'));
-const llmPipelineLabel = computed(() =>
-  captureSettings.value.useOcr
-    ? `Task LLM: ${taskProviderLabel.value}`
-    : `Image LLM: ${imageProviderLabel.value} -> Task LLM: ${taskProviderLabel.value}`,
-);
-const confidenceValue = computed(() => (confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`));
-
-function prettifyHotkey(value?: string) {
-  if (!value) return '';
-
-  return value
-    .replace(/CommandOrControl/gi, 'Ctrl/Cmd')
-    .replace(/\+/g, ' + ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 function setResult(payload: OverlayResult) {
   result.value = payload.text || '(no text detected)';
-  confidence.value = payload.confidence ?? null;
   error.value = payload.error ?? '';
   lastUpdate.value = payload.error ? 'Error reported' : payload.text ? 'Text updated' : 'No text found';
 }
@@ -197,14 +165,6 @@ function setStatus(value: string) {
 }
 
 function applyMode(payload: OverlayModePayload) {
-  if (payload?.hotkeys?.quick) {
-    quickHotkey.value = prettifyHotkey(payload.hotkeys.quick) || quickHotkey.value;
-  }
-
-  if (payload?.hotkeys?.region) {
-    regionHotkey.value = prettifyHotkey(payload.hotkeys.region) || regionHotkey.value;
-  }
-
   if (payload?.mode === 'selecting') {
     status.value = 'Region selection is disabled. Running quick capture instead.';
     lastUpdate.value = 'Selection disabled';
@@ -293,8 +253,6 @@ function loadPreferences() {
 
     preferences.value = {
       compactLayout: Boolean(parsed.compactLayout),
-      showConfidenceMeter: parsed.showConfidenceMeter !== false,
-      showFooterHints: parsed.showFooterHints !== false,
       animateTextUpdates: parsed.animateTextUpdates !== false,
       hideFromScreenshots: parsed.hideFromScreenshots !== false,
     };
@@ -460,18 +418,9 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="meta-row">
-          <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
-          <span v-if="preferences.showConfidenceMeter">Confidence {{ confidenceValue }}</span>
-          <span v-if="error" class="meta-error">{{ error }}</span>
+        <div v-if="error" class="meta-row">
+          <span class="meta-error">{{ error }}</span>
         </div>
-
-        <footer class="footer-row" v-if="preferences.showFooterHints">
-          <span>Quick {{ quickHotkey }}</span>
-          <span>Region {{ regionHotkey }}</span>
-          <span>{{ ocrModeLabel }}</span>
-          <span>{{ llmPipelineLabel }}</span>
-        </footer>
       </div>
 
       <section v-else class="settings-view no-drag">
@@ -570,16 +519,6 @@ onUnmounted(() => {
             </label>
 
             <label class="toggle-row">
-              <span>Show confidence</span>
-              <input type="checkbox" v-model="preferences.showConfidenceMeter" />
-            </label>
-
-            <label class="toggle-row">
-              <span>Show hotkeys</span>
-              <input type="checkbox" v-model="preferences.showFooterHints" />
-            </label>
-
-            <label class="toggle-row">
               <span>Animate output updates</span>
               <input type="checkbox" v-model="preferences.animateTextUpdates" />
             </label>
@@ -588,27 +527,6 @@ onUnmounted(() => {
               <span>Hide in screenshots</span>
               <input type="checkbox" v-model="preferences.hideFromScreenshots" />
             </label>
-
-            <div class="settings-meta">
-              <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
-              <span>{{ ocrModeLabel }}</span>
-              <span>{{ llmPipelineLabel }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="shortcuts-panel">
-          <div>
-            <span>Quick</span>
-            <strong>{{ quickHotkey }}</strong>
-          </div>
-          <div>
-            <span>Region</span>
-            <strong>{{ regionHotkey }}</strong>
-          </div>
-          <div>
-            <span>Settings</span>
-            <strong>Ctrl/Cmd + ,</strong>
           </div>
         </div>
       </section>
@@ -640,7 +558,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 8px;
   padding: 10px;
 }
@@ -764,14 +682,6 @@ onUnmounted(() => {
 
 .meta-error {
   color: #d39595;
-}
-
-.footer-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  font-size: 11px;
-  color: #949494;
 }
 
 .settings-view {
@@ -905,38 +815,6 @@ onUnmounted(() => {
   white-space: pre-wrap;
 }
 
-.settings-meta {
-  border-top: 1px solid #2b2b2b;
-  padding-top: 8px;
-  display: grid;
-  gap: 6px;
-  font-size: 12px;
-  color: #adadad;
-}
-
-.shortcuts-panel {
-  border: 1px solid #2b2b2b;
-  border-radius: 8px;
-  background: #101010;
-  padding: 10px;
-  display: grid;
-  gap: 8px;
-}
-
-.shortcuts-panel div {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: #c1c1c1;
-}
-
-.shortcuts-panel strong {
-  color: #ececec;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-weight: 500;
-}
 
 .no-drag {
   -webkit-app-region: no-drag;

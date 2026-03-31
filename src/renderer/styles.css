@@ -209,7 +209,7 @@ body {
 
 .metrics {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 14px;
   margin-top: 14px;
 }
@@ -247,48 +247,6 @@ body {
 
 .metric__value--error {
   color: #fda4af;
-}
-
-.meter {
-  margin-top: 14px;
-  height: 8px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(18, 24, 40, 0.92);
-}
-
-.meter span {
-  display: block;
-  height: 100%;
-  width: 0%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent-mint), var(--accent-sky), var(--accent-amber));
-  transition: width 360ms ease;
-}
-
-.footer {
-  margin-top: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  color: rgba(229, 236, 255, 0.5);
-  text-transform: uppercase;
-  letter-spacing: 0.25em;
-  font-size: 10px;
-}
-
-.hotkey-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.hotkey {
-  padding: 8px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
 }
 
 body[data-state='capturing'] .panel {
@@ -383,16 +341,6 @@ body[data-state='error'] .state-pill {
 
   .metrics {
     grid-template-columns: 1fr;
-  }
-
-  .footer {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .hotkey-group {
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .selection-guide {

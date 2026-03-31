@@ -28,42 +28,15 @@ declare global {
 
 const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
-const metaEl = document.getElementById('meta');
 const statePillEl = document.getElementById('statePill');
-const confidenceValueEl = document.getElementById('confidenceValue');
-const confidenceBarEl = document.getElementById('confidenceBar');
 const errorValueEl = document.getElementById('errorValue');
-const quickHotkeyEl = document.getElementById('quickHotkey');
-const regionHotkeyEl = document.getElementById('regionHotkey');
 
 const uiState = {
-  status: 'Press Ctrl/Cmd + Shift + O for quick capture.',
+  status: 'Ready to capture.',
   result: 'Waiting for LLM output...',
-  confidence: null as number | null,
   error: '',
   state: 'idle' as 'idle' | 'capturing' | 'processing' | 'done' | 'error',
-  hotkeys: {
-    quick: 'Ctrl/Cmd + Shift + O',
-    region: 'Ctrl/Cmd + Shift + R',
-  },
 };
-
-function clampConfidence(value: number | null | undefined): number {
-  if (typeof value !== 'number' || Number.isNaN(value)) return 0;
-  return Math.max(0, Math.min(100, value));
-}
-
-function prettifyHotkey(value: string | undefined): string {
-  if (typeof value !== 'string' || !value.trim()) {
-    return '';
-  }
-
-  return value
-    .replace(/CommandOrControl/gi, 'Ctrl/Cmd')
-    .replace(/\+/g, ' + ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 function deriveState(status: string, payload?: OverlayResultPayload): 'idle' | 'capturing' | 'processing' | 'done' | 'error' {
   const text = `${status || ''} ${payload?.error || ''}`.toLowerCase();
@@ -78,12 +51,6 @@ function syncUI(): void {
   document.body.dataset.state = uiState.state;
   if (statusEl) statusEl.textContent = uiState.status;
   if (resultEl) resultEl.textContent = uiState.result;
-  if (metaEl) {
-    metaEl.textContent =
-      uiState.state === 'error'
-        ? 'Bridge reported an error'
-        : 'Bridge ready';
-  }
   if (statePillEl) {
     statePillEl.textContent =
       uiState.state === 'capturing'
@@ -97,38 +64,20 @@ function syncUI(): void {
               : 'Idle';
   }
 
-  if (confidenceValueEl && confidenceBarEl) {
-    if (uiState.confidence === null || uiState.confidence === undefined) {
-      confidenceValueEl.textContent = '--';
-      (confidenceBarEl as HTMLElement).style.width = '0%';
-    } else {
-      confidenceValueEl.textContent = `${uiState.confidence.toFixed(1)}%`;
-      (confidenceBarEl as HTMLElement).style.width = `${clampConfidence(uiState.confidence)}%`;
-    }
-  }
-
   if (errorValueEl) {
     errorValueEl.textContent = uiState.error || 'No errors reported.';
     errorValueEl.classList.toggle('metric__value--error', Boolean(uiState.error));
-  }
-
-  if (quickHotkeyEl) {
-    quickHotkeyEl.textContent = `Quick: ${uiState.hotkeys.quick}`;
-  }
-  if (regionHotkeyEl) {
-    regionHotkeyEl.textContent = `Region: ${uiState.hotkeys.region}`;
   }
 }
 
 function updateStatus(text: string): void {
   uiState.status = text;
-  uiState.state = deriveState(text, { error: uiState.error, text: uiState.result, confidence: uiState.confidence });
+  uiState.state = deriveState(text, { error: uiState.error, text: uiState.result, confidence: null });
   syncUI();
 }
 
 function updateResult(payload: OverlayResultPayload): void {
   if (!payload) return;
-  uiState.confidence = payload.confidence ?? null;
   if (payload.error) {
     uiState.error = payload.error;
     uiState.result = `Error: ${payload.error}`;
@@ -141,17 +90,7 @@ function updateResult(payload: OverlayResultPayload): void {
   syncUI();
 }
 
-function applyMode(payload: OverlayModePayload): void {
-  const quick = prettifyHotkey(payload?.hotkeys?.quick);
-  if (quick) {
-    uiState.hotkeys.quick = quick;
-  }
-
-  const region = prettifyHotkey(payload?.hotkeys?.region);
-  if (region) {
-    uiState.hotkeys.region = region;
-  }
-
+function applyMode(_payload: OverlayModePayload): void {
   syncUI();
 }
 

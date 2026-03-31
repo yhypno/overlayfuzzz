@@ -1248,7 +1248,7 @@ function registerOverlayIpc(): void {
     }
 
     if (!latestCapture) {
-      overlayWindow.webContents.send('ocr-status', 'No screenshot captured yet. Press the capture hotkey first.');
+      overlayWindow.webContents.send('ocr-status', 'No screenshot captured yet.');
       return false;
     }
 
