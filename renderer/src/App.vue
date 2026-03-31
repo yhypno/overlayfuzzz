@@ -12,9 +12,13 @@ interface UiPreferences {
   showFooterHints: boolean;
   animateTextUpdates: boolean;
   hideFromScreenshots: boolean;
+  typePasteDelayMs: number;
 }
 
 const SETTINGS_STORAGE_KEY = 'overlayfuzz-ui-settings';
+const TYPE_PASTE_DELAY_MIN_MS = 0;
+const TYPE_PASTE_DELAY_MAX_MS = 250;
+const TYPE_PASTE_DELAY_DEFAULT_MS = 10;
 const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'ollama', label: 'Ollama' },
@@ -34,6 +38,7 @@ const regionHotkey = ref('Ctrl/Cmd + Shift + R');
 const queryInputEl = ref<HTMLInputElement | null>(null);
 const queryText = ref('');
 const querySubmitting = ref(false);
+const typingResult = ref(false);
 const activePage = ref<Page>('console');
 const settingsError = ref('');
 const settingsNotice = ref('');
@@ -45,6 +50,7 @@ const preferences = ref<UiPreferences>({
   showFooterHints: true,
   animateTextUpdates: true,
   hideFromScreenshots: true,
+  typePasteDelayMs: TYPE_PASTE_DELAY_DEFAULT_MS,
 });
 
 function createDefaultCaptureSettings(): CaptureSettings {
@@ -167,6 +173,24 @@ const llmPipelineLabel = computed(() =>
     : `Image LLM: ${imageProviderLabel.value} -> Task LLM: ${taskProviderLabel.value}`,
 );
 const confidenceValue = computed(() => (confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`));
+const typePasteTargetText = computed(() => {
+  const raw = result.value ?? '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (trimmed === 'Waiting for capture.' || trimmed === '(no text detected)') {
+    return '';
+  }
+  return raw;
+});
+
+function normalizeTypePasteDelayMs(value: unknown): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return TYPE_PASTE_DELAY_DEFAULT_MS;
+  }
+
+  const rounded = Math.round(value);
+  return Math.min(TYPE_PASTE_DELAY_MAX_MS, Math.max(TYPE_PASTE_DELAY_MIN_MS, rounded));
+}
 
 function prettifyHotkey(value?: string) {
   if (!value) return '';
@@ -297,6 +321,7 @@ function loadPreferences() {
       showFooterHints: parsed.showFooterHints !== false,
       animateTextUpdates: parsed.animateTextUpdates !== false,
       hideFromScreenshots: parsed.hideFromScreenshots !== false,
+      typePasteDelayMs: normalizeTypePasteDelayMs(parsed.typePasteDelayMs),
     };
   } catch {
     // Ignore malformed local settings and keep defaults.
@@ -321,6 +346,16 @@ watch(
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
   },
   { deep: true },
+);
+
+watch(
+  () => preferences.value.typePasteDelayMs,
+  (next) => {
+    const normalized = normalizeTypePasteDelayMs(next);
+    if (normalized !== next) {
+      preferences.value.typePasteDelayMs = normalized;
+    }
+  },
 );
 
 watch(
@@ -370,6 +405,36 @@ async function submitQueryFromComposer() {
     setStatus('Failed to submit query.');
   } finally {
     querySubmitting.value = false;
+  }
+}
+
+async function typePasteResult() {
+  if (typingResult.value) {
+    return;
+  }
+
+  const text = typePasteTargetText.value;
+  if (!text) {
+    setStatus('No result text to type yet.');
+    return;
+  }
+
+  if (!window.overlayApi?.typeText) {
+    setStatus('Bridge unavailable. Unable to type text.');
+    return;
+  }
+
+  typingResult.value = true;
+  try {
+    const ok = await window.overlayApi.typeText(text, normalizeTypePasteDelayMs(preferences.value.typePasteDelayMs));
+    if (!ok) {
+      setStatus('Typing failed. Check accessibility/input permissions for this app.');
+    }
+  } catch (typeError) {
+    error.value = typeError instanceof Error ? typeError.message : String(typeError);
+    setStatus('Typing failed. Check accessibility/input permissions for this app.');
+  } finally {
+    typingResult.value = false;
   }
 }
 
@@ -447,17 +512,27 @@ onUnmounted(() => {
             type="text"
             v-model="queryText"
             placeholder="Query"
-            :disabled="querySubmitting || !bridgeReady"
+            :disabled="querySubmitting || typingResult || !bridgeReady"
             @keydown.enter.prevent="submitQueryFromComposer"
           />
-          <button
-            type="button"
-            class="send-button"
-            :disabled="querySubmitting || !bridgeReady || !queryText.trim()"
-            @click="submitQueryFromComposer"
-          >
-            {{ querySubmitting ? 'Sending' : 'Send' }}
-          </button>
+          <div class="query-actions">
+            <button
+              type="button"
+              class="send-button"
+              :disabled="querySubmitting || typingResult || !bridgeReady || !queryText.trim()"
+              @click="submitQueryFromComposer"
+            >
+              {{ querySubmitting ? 'Sending' : 'Send' }}
+            </button>
+            <button
+              type="button"
+              class="send-button paste-button"
+              :disabled="typingResult || querySubmitting || !bridgeReady || !typePasteTargetText"
+              @click="typePasteResult"
+            >
+              {{ typingResult ? 'Typing' : 'Type Paste' }}
+            </button>
+          </div>
         </div>
 
         <div class="meta-row">
@@ -589,6 +664,17 @@ onUnmounted(() => {
               <input type="checkbox" v-model="preferences.hideFromScreenshots" />
             </label>
 
+            <label class="field field-full">
+              <span>Type paste speed (ms per character)</span>
+              <input
+                type="number"
+                min="0"
+                max="250"
+                step="1"
+                v-model.number="preferences.typePasteDelayMs"
+              />
+            </label>
+
             <div class="settings-meta">
               <span>{{ bridgeReady ? 'Bridge connected' : 'Bridge unavailable' }}</span>
               <span>{{ ocrModeLabel }}</span>
@@ -710,6 +796,11 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.query-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .query-input {
   width: 100%;
   min-width: 0;
@@ -744,6 +835,11 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 600;
   padding: 8px 12px;
+}
+
+.paste-button {
+  border-color: #42674f;
+  background: #1c2d22;
 }
 
 .send-button:disabled,
@@ -976,6 +1072,11 @@ onUnmounted(() => {
 
 @media (max-width: 700px) {
   .query-row {
+    grid-template-columns: 1fr;
+  }
+
+  .query-actions {
+    display: grid;
     grid-template-columns: 1fr;
   }
 

@@ -7,6 +7,7 @@ import {
   type BrowserWindowConstructorOptions,
   type Display,
 } from 'electron';
+import { execFile } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,6 +30,10 @@ const CONSOLE_DEFAULT_SIZE = { width: 640, height: 320 };
 const CONSOLE_WINDOW_MARGIN = 28;
 const OCR_WORKER_ENTRY = path.join(__dirname, 'ocr-worker.js');
 const CAPTURE_SETTINGS_FILE = 'overlayfuzz-settings.json';
+const TYPE_TEXT_FOCUS_DELAY_MS = 110;
+const TYPE_TEXT_MIN_DELAY_MS = 0;
+const TYPE_TEXT_MAX_DELAY_MS = 250;
+const TYPE_TEXT_DEFAULT_DELAY_MS = 10;
 const LLM_PROVIDERS = ['openrouter', 'ollama', 'openai', 'anthropic', 'gemini'] as const;
 
 type LlmProvider = (typeof LLM_PROVIDERS)[number];
@@ -256,6 +261,130 @@ function getCursorDisplay(): Display {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function normalizeTypeDelayMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return TYPE_TEXT_DEFAULT_DELAY_MS;
+  }
+
+  return clamp(Math.round(value), TYPE_TEXT_MIN_DELAY_MS, TYPE_TEXT_MAX_DELAY_MS);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function runExecFile(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { windowsHide: true }, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+const APPLE_SCRIPT_TYPE_TEXT = `
+on run argv
+  set textToType to item 1 of argv
+  set delayMs to item 2 of argv as integer
+  if delayMs is less than 0 then set delayMs to 0
+  set delaySeconds to delayMs / 1000
+  tell application "System Events"
+    repeat with i from 1 to (count characters of textToType)
+      set currentChar to character i of textToType
+      if currentChar is return or currentChar is linefeed then
+        key code 36
+      else
+        keystroke currentChar
+      end if
+      if delaySeconds is greater than 0 then
+        delay delaySeconds
+      end if
+    end repeat
+  end tell
+end run
+`.trim();
+
+const POWERSHELL_TYPE_TEXT = [
+  'param(',
+  '  [string]$Text,',
+  '  [int]$DelayMs',
+  ')',
+  'if ($DelayMs -lt 0) { $DelayMs = 0 }',
+  '$wshell = New-Object -ComObject WScript.Shell',
+  'foreach ($char in $Text.ToCharArray()) {',
+  '  switch ($char) {',
+  '    "`r" { continue }',
+  '    "`n" { $wshell.SendKeys("{ENTER}") }',
+  '    "+" { $wshell.SendKeys("{+}") }',
+  '    "^" { $wshell.SendKeys("{^}") }',
+  '    "%" { $wshell.SendKeys("{%}") }',
+  '    "~" { $wshell.SendKeys("{~}") }',
+  '    "(" { $wshell.SendKeys("{(}") }',
+  '    ")" { $wshell.SendKeys("{)}") }',
+  '    "[" { $wshell.SendKeys("{[}") }',
+  '    "]" { $wshell.SendKeys("{]}") }',
+  '    "{" { $wshell.SendKeys("{{}") }',
+  '    "}" { $wshell.SendKeys("{}}") }',
+  '    default { $wshell.SendKeys([string]$char) }',
+  '  }',
+  '  if ($DelayMs -gt 0) { Start-Sleep -Milliseconds $DelayMs }',
+  '}',
+].join('\n');
+
+async function typeTextWithOsascript(text: string, delayMs: number): Promise<void> {
+  await runExecFile('osascript', ['-e', APPLE_SCRIPT_TYPE_TEXT, text, String(delayMs)]);
+}
+
+async function typeTextWithPowershell(text: string, delayMs: number): Promise<void> {
+  await runExecFile(
+    'powershell',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', POWERSHELL_TYPE_TEXT, '-Text', text, '-DelayMs', String(delayMs)],
+  );
+}
+
+async function typeTextWithXdotool(text: string, delayMs: number): Promise<void> {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = normalized.split('\n');
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line) {
+      await runExecFile('xdotool', ['type', '--clearmodifiers', '--delay', String(delayMs), line]);
+    }
+
+    if (index < lines.length - 1) {
+      await runExecFile('xdotool', ['key', 'Return']);
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+  }
+}
+
+async function typeTextIntoActiveApp(text: string, delayMs: number): Promise<void> {
+  if (process.platform === 'darwin') {
+    await typeTextWithOsascript(text, delayMs);
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    await typeTextWithPowershell(text, delayMs);
+    return;
+  }
+
+  if (process.platform === 'linux') {
+    await typeTextWithXdotool(text, delayMs);
+    return;
+  }
+
+  throw new Error(`Unsupported platform: ${process.platform}`);
 }
 
 function getDisplayWorkArea(display: Display | null): Electron.Rectangle | null {
@@ -1203,6 +1332,26 @@ function registerOverlayIpc(): void {
     hideOverlay();
   });
 
+  ipcMain.handle('overlay:type-text', async (_event, text: unknown, delayMs: unknown) => {
+    const normalizedText = typeof text === 'string' ? text : '';
+    if (!normalizedText.trim()) {
+      return false;
+    }
+
+    hideOverlay();
+    await sleep(TYPE_TEXT_FOCUS_DELAY_MS);
+
+    try {
+      const normalizedDelay = normalizeTypeDelayMs(delayMs);
+      await typeTextIntoActiveApp(normalizedText, normalizedDelay);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[overlayFuzz] Failed to type text into the active application:', message);
+      return false;
+    }
+  });
+
   ipcMain.handle('overlay:get-settings', () => {
     return cloneCaptureSettings(captureSettings);
   });
@@ -1566,6 +1715,7 @@ app.on('will-quit', () => {
 
   globalShortcut.unregisterAll();
   ipcMain.removeHandler('overlay:hide-console');
+  ipcMain.removeHandler('overlay:type-text');
   ipcMain.removeHandler('overlay:get-settings');
   ipcMain.removeHandler('overlay:update-settings');
   ipcMain.removeHandler('overlay:set-screenshot-exclusion');
