@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('overlayApi', {
   hideOverlay: async (): Promise<boolean> => {
     return ipcRenderer.invoke('overlay:hide-console');
   },
+  typeText: async (text: string, delayMs = 0): Promise<boolean> => {
+    return ipcRenderer.invoke('overlay:type-text', text, delayMs);
+  },
   getSettings: async (): Promise<CaptureSettings> => {
     return ipcRenderer.invoke('overlay:get-settings');
   },

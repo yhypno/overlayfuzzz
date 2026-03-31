@@ -49,6 +49,7 @@ export interface OverlayApi {
   onResult(callback: (payload: OverlayResult) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
   hideOverlay(): Promise<boolean>;
+  typeText(text: string, delayMs?: number): Promise<boolean>;
   getSettings(): Promise<CaptureSettings>;
   updateSettings(settings: CaptureSettings): Promise<CaptureSettings>;
   setScreenshotExclusion(enabled: boolean): Promise<boolean>;
