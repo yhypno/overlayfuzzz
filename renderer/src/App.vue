@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppTitlebar from './components/AppTitlebar.vue';
-import type { CaptureSettings, LlmProvider, OverlayModePayload, OverlayResult } from './types/overlay';
+import type {
+  CaptureCollectionPayload,
+  CapturePreviewPayload,
+  CaptureSettings,
+  LlmProvider,
+  OverlayModePayload,
+  OverlayResult,
+} from './types/overlay';
 
 type Stage = 'idle' | 'capturing' | 'processing' | 'done' | 'error';
 type Page = 'console' | 'settings';
@@ -23,14 +30,16 @@ const PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'gemini', label: 'Gemini' },
 ];
 
-const status = ref('Press Ctrl/Cmd + Shift + O to capture.');
-const result = ref('Waiting for capture.');
+const status = ref('Press Ctrl/Cmd + Shift + O to open, then Ctrl/Cmd + Shift + 1 to capture.');
+const result = ref('Waiting for screenshot.');
 const confidence = ref<number | null>(null);
 const error = ref('');
 const bridgeReady = ref(false);
 const lastUpdate = ref('Idle');
-const quickHotkey = ref('Ctrl/Cmd + Shift + O');
-const regionHotkey = ref('Ctrl/Cmd + Shift + R');
+const openHotkey = ref('Ctrl/Cmd + Shift + O');
+const captureHotkey = ref('Ctrl/Cmd + Shift + 1');
+const captures = ref<CapturePreviewPayload[]>([]);
+const activeCaptureId = ref<string | null>(null);
 const queryInputEl = ref<HTMLInputElement | null>(null);
 const queryText = ref('');
 const querySubmitting = ref(false);
@@ -167,6 +176,7 @@ const llmPipelineLabel = computed(() =>
     : `Image LLM: ${imageProviderLabel.value} -> Task LLM: ${taskProviderLabel.value}`,
 );
 const confidenceValue = computed(() => (confidence.value === null ? '--' : `${confidence.value.toFixed(1)}%`));
+const hasCaptures = computed(() => captures.value.length > 0);
 
 function prettifyHotkey(value?: string) {
   if (!value) return '';
@@ -198,17 +208,38 @@ function setStatus(value: string) {
 
 function applyMode(payload: OverlayModePayload) {
   if (payload?.hotkeys?.quick) {
-    quickHotkey.value = prettifyHotkey(payload.hotkeys.quick) || quickHotkey.value;
+    openHotkey.value = prettifyHotkey(payload.hotkeys.quick) || openHotkey.value;
   }
 
-  if (payload?.hotkeys?.region) {
-    regionHotkey.value = prettifyHotkey(payload.hotkeys.region) || regionHotkey.value;
+  const captureShortcut = payload?.hotkeys?.capture || payload?.hotkeys?.region;
+  if (captureShortcut) {
+    captureHotkey.value = prettifyHotkey(captureShortcut) || captureHotkey.value;
   }
 
   if (payload?.mode === 'selecting') {
-    status.value = 'Region selection is disabled. Running quick capture instead.';
+    status.value = 'Region selection is disabled. Use the capture shortcut instead.';
     lastUpdate.value = 'Selection disabled';
   }
+}
+
+function applyCaptureCollection(payload: CaptureCollectionPayload) {
+  if (!payload || !Array.isArray(payload.captures)) {
+    captures.value = [];
+    activeCaptureId.value = null;
+    return;
+  }
+
+  captures.value = payload.captures;
+  activeCaptureId.value = payload.activeCaptureId || null;
+}
+
+function formatCaptureTime(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) return '--:--:--';
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 async function loadCaptureSettings() {
@@ -224,6 +255,19 @@ async function loadCaptureSettings() {
     }
   } catch (loadError) {
     settingsError.value = loadError instanceof Error ? loadError.message : String(loadError);
+  }
+}
+
+async function loadCaptureCollection() {
+  if (!window.overlayApi?.getCaptures) {
+    return;
+  }
+
+  try {
+    const payload = await window.overlayApi.getCaptures();
+    applyCaptureCollection(payload);
+  } catch {
+    // Ignore capture history load failures and continue.
   }
 }
 
@@ -395,6 +439,7 @@ onMounted(() => {
   window.addEventListener('keydown', onWindowKeydown);
   loadPreferences();
   void loadCaptureSettings();
+  void loadCaptureCollection();
 
   if (!window.overlayApi) return;
 
@@ -408,6 +453,10 @@ onMounted(() => {
 
   window.overlayApi.onMode((payload) => {
     applyMode(payload);
+  });
+
+  window.overlayApi.onCaptures((payload) => {
+    applyCaptureCollection(payload);
   });
 });
 
@@ -432,6 +481,21 @@ onUnmounted(() => {
           <span class="status-text">{{ status }}</span>
           <span class="status-chip">{{ stageLabel }}</span>
         </div>
+
+        <section class="captures-panel">
+          <div v-if="hasCaptures" class="captures-strip">
+            <article
+              v-for="(capture, index) in captures"
+              :key="capture.id"
+              class="capture-thumb"
+              :class="{ active: capture.id === activeCaptureId }"
+            >
+              <img :src="capture.thumbnailDataUrl" :alt="`Screenshot ${index + 1}`" />
+              <span class="capture-meta">#{{ index + 1 }} {{ formatCaptureTime(capture.capturedAt) }}</span>
+            </article>
+          </div>
+          <p v-else class="captures-empty">No screenshots yet. Press {{ captureHotkey }} to add one.</p>
+        </section>
 
         <section class="result-panel">
           <Transition v-if="preferences.animateTextUpdates" name="fade-swap" mode="out-in">
@@ -467,8 +531,8 @@ onUnmounted(() => {
         </div>
 
         <footer class="footer-row" v-if="preferences.showFooterHints">
-          <span>Quick {{ quickHotkey }}</span>
-          <span>Region {{ regionHotkey }}</span>
+          <span>Open {{ openHotkey }}</span>
+          <span>Capture {{ captureHotkey }}</span>
           <span>{{ ocrModeLabel }}</span>
           <span>{{ llmPipelineLabel }}</span>
         </footer>
@@ -599,12 +663,12 @@ onUnmounted(() => {
 
         <div class="shortcuts-panel">
           <div>
-            <span>Quick</span>
-            <strong>{{ quickHotkey }}</strong>
+            <span>Open</span>
+            <strong>{{ openHotkey }}</strong>
           </div>
           <div>
-            <span>Region</span>
-            <strong>{{ regionHotkey }}</strong>
+            <span>Capture</span>
+            <strong>{{ captureHotkey }}</strong>
           </div>
           <div>
             <span>Settings</span>
@@ -640,7 +704,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   gap: 8px;
   padding: 10px;
 }
@@ -678,6 +742,60 @@ onUnmounted(() => {
   font-size: 11px;
   color: #bfbfbf;
   background: #171717;
+}
+
+.captures-panel {
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #101010;
+  min-height: 84px;
+  padding: 6px;
+  overflow: hidden;
+}
+
+.captures-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
+.capture-thumb {
+  flex: 0 0 116px;
+  display: grid;
+  gap: 4px;
+}
+
+.capture-thumb img {
+  width: 100%;
+  height: 64px;
+  border-radius: 6px;
+  border: 1px solid #2f2f2f;
+  object-fit: cover;
+  background: #171717;
+  box-sizing: border-box;
+}
+
+.capture-thumb.active img {
+  border-color: #5d7f6a;
+}
+
+.capture-meta {
+  display: block;
+  font-size: 10px;
+  color: #a3a3a3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+.captures-empty {
+  margin: 0;
+  padding: 8px;
+  font-size: 11px;
+  color: #959595;
 }
 
 .result-panel {

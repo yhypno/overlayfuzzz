@@ -35,8 +35,20 @@ export interface OverlayModePayload {
   mode: 'console' | 'selecting';
   hotkeys?: {
     quick?: string;
+    capture?: string;
     region?: string;
   };
+}
+
+export interface CapturePreviewPayload {
+  id: string;
+  thumbnailDataUrl: string;
+  capturedAt: number;
+}
+
+export interface CaptureCollectionPayload {
+  captures: CapturePreviewPayload[];
+  activeCaptureId: string | null;
 }
 
 export interface OverlayRegionResponse {
@@ -48,8 +60,10 @@ export interface OverlayApi {
   onStatus(callback: (status: string) => void): void;
   onResult(callback: (payload: OverlayResult) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
+  onCaptures(callback: (payload: CaptureCollectionPayload) => void): void;
   hideOverlay(): Promise<boolean>;
   getSettings(): Promise<CaptureSettings>;
+  getCaptures(): Promise<CaptureCollectionPayload>;
   updateSettings(settings: CaptureSettings): Promise<CaptureSettings>;
   setScreenshotExclusion(enabled: boolean): Promise<boolean>;
   getScreenshotExclusion(): Promise<boolean>;

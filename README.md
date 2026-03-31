@@ -3,14 +3,15 @@
 Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's approach (overlay window + OCR + global input hooks).
 
 ## What it does
-- Press `Ctrl/Cmd + Shift + O` to show the overlay and capture a full-display screenshot.
-- Press `Ctrl/Cmd + Shift + R` to trigger the secondary capture hotkey. Right now it mirrors the quick capture flow rather than opening a drag-to-select region tool.
+- Press `Ctrl/Cmd + Shift + O` to open/focus the overlay window (no capture is taken on open).
+- Press `Ctrl/Cmd + Shift + 1` to capture a full-display screenshot while the overlay is open. If the overlay is hidden, this hotkey opens it first, then captures.
+- Each capture is added to a horizontal thumbnail strip so you can keep multiple screenshots in one session.
 - After capture, type a query in the chat-style input and press `Enter` to run the LLM pipeline.
 - Default pipeline is screenshot capture -> extraction -> task LLM.
 - OCR is optional and can be enabled from Settings to augment prompts before the LLM call.
+- If OCR runtime files are missing (for example `eng.traineddata`), the app automatically falls back to image-LLM extraction.
 - Supported LLM providers: OpenRouter, Ollama, OpenAI, Anthropic, Gemini.
 - Overlay UI shows LLM output, a query composer, OCR confidence (when OCR is enabled), status, and error state.
-- Press the active hotkey again to hide the overlay.
 - Press `Esc` while the overlay is focused to hide it, or `Ctrl/Cmd + ,` to open the overlay settings page.
 - Settings now include `Hide overlay in screenshots`, which toggles whether the overlay window is excluded from OS/app screenshots.
 

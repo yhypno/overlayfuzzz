@@ -8,15 +8,29 @@ interface OverlayModePayload {
   mode: 'console';
   hotkeys?: {
     quick?: string;
+    capture?: string;
     region?: string;
   };
+}
+
+interface CapturePreviewPayload {
+  id: string;
+  thumbnailDataUrl: string;
+  capturedAt: number;
+}
+
+interface CaptureCollectionPayload {
+  captures: CapturePreviewPayload[];
+  activeCaptureId: string | null;
 }
 
 interface OverlayApi {
   onStatus(callback: (status: string) => void): void;
   onResult(callback: (payload: OverlayResultPayload) => void): void;
   onMode(callback: (payload: OverlayModePayload) => void): void;
+  onCaptures?(callback: (payload: CaptureCollectionPayload) => void): void;
   hideOverlay(): void;
+  getCaptures?(): Promise<CaptureCollectionPayload>;
   submitQuery?(query: string): Promise<boolean>;
 }
 
@@ -35,17 +49,21 @@ const confidenceBarEl = document.getElementById('confidenceBar');
 const errorValueEl = document.getElementById('errorValue');
 const quickHotkeyEl = document.getElementById('quickHotkey');
 const regionHotkeyEl = document.getElementById('regionHotkey');
+const captureStripEl = document.getElementById('captureStrip');
+const captureEmptyEl = document.getElementById('captureEmpty');
 
 const uiState = {
-  status: 'Press Ctrl/Cmd + Shift + O for quick capture.',
+  status: 'Press Ctrl/Cmd + Shift + O to open, then Ctrl/Cmd + Shift + 1 to capture.',
   result: 'Waiting for LLM output...',
   confidence: null as number | null,
   error: '',
   state: 'idle' as 'idle' | 'capturing' | 'processing' | 'done' | 'error',
   hotkeys: {
     quick: 'Ctrl/Cmd + Shift + O',
-    region: 'Ctrl/Cmd + Shift + R',
+    capture: 'Ctrl/Cmd + Shift + 1',
   },
+  captures: [] as CapturePreviewPayload[],
+  activeCaptureId: null as string | null,
 };
 
 function clampConfidence(value: number | null | undefined): number {
@@ -113,10 +131,63 @@ function syncUI(): void {
   }
 
   if (quickHotkeyEl) {
-    quickHotkeyEl.textContent = `Quick: ${uiState.hotkeys.quick}`;
+    quickHotkeyEl.textContent = `Open: ${uiState.hotkeys.quick}`;
   }
   if (regionHotkeyEl) {
-    regionHotkeyEl.textContent = `Region: ${uiState.hotkeys.region}`;
+    regionHotkeyEl.textContent = `Capture: ${uiState.hotkeys.capture}`;
+  }
+
+  renderCaptureStrip();
+}
+
+function formatCaptureTime(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) {
+    return '--:--:--';
+  }
+
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function renderCaptureStrip(): void {
+  if (!captureStripEl || !captureEmptyEl) {
+    return;
+  }
+
+  captureStripEl.textContent = '';
+  if (!uiState.captures.length) {
+    captureStripEl.setAttribute('hidden', 'hidden');
+    captureEmptyEl.textContent = `No screenshots yet. Press ${uiState.hotkeys.capture}.`;
+    captureEmptyEl.removeAttribute('hidden');
+    return;
+  }
+
+  captureEmptyEl.setAttribute('hidden', 'hidden');
+  captureStripEl.removeAttribute('hidden');
+
+  for (let index = 0; index < uiState.captures.length; index += 1) {
+    const capture = uiState.captures[index];
+    const itemEl = document.createElement('article');
+    itemEl.className = 'captures__item';
+    if (capture.id === uiState.activeCaptureId) {
+      itemEl.classList.add('captures__item--active');
+    }
+
+    const thumbEl = document.createElement('img');
+    thumbEl.className = 'captures__thumb';
+    thumbEl.src = capture.thumbnailDataUrl;
+    thumbEl.alt = `Screenshot ${index + 1}`;
+    itemEl.appendChild(thumbEl);
+
+    const metaEl = document.createElement('span');
+    metaEl.className = 'captures__meta';
+    metaEl.textContent = `#${index + 1} ${formatCaptureTime(capture.capturedAt)}`;
+    itemEl.appendChild(metaEl);
+
+    captureStripEl.appendChild(itemEl);
   }
 }
 
@@ -147,11 +218,24 @@ function applyMode(payload: OverlayModePayload): void {
     uiState.hotkeys.quick = quick;
   }
 
-  const region = prettifyHotkey(payload?.hotkeys?.region);
-  if (region) {
-    uiState.hotkeys.region = region;
+  const capture = prettifyHotkey(payload?.hotkeys?.capture || payload?.hotkeys?.region);
+  if (capture) {
+    uiState.hotkeys.capture = capture;
   }
 
+  syncUI();
+}
+
+function applyCaptures(payload: CaptureCollectionPayload): void {
+  if (!payload || !Array.isArray(payload.captures)) {
+    uiState.captures = [];
+    uiState.activeCaptureId = null;
+    syncUI();
+    return;
+  }
+
+  uiState.captures = payload.captures;
+  uiState.activeCaptureId = payload.activeCaptureId || null;
   syncUI();
 }
 
@@ -160,6 +244,8 @@ if (window.overlayApi) {
   window.overlayApi.onStatus(updateStatus);
   window.overlayApi.onResult(updateResult);
   window.overlayApi.onMode(applyMode);
+  window.overlayApi.onCaptures?.(applyCaptures);
+  void window.overlayApi.getCaptures?.().then(applyCaptures).catch(() => {});
   syncUI();
 } else {
   uiState.state = 'error';

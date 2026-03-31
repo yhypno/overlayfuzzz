@@ -21,7 +21,11 @@
             </div>
             <div class="state-pill" id="statePill">Idle</div>
           </div>
-          <div class="status" id="status">Press Ctrl/Cmd + Shift + O to capture.</div>
+          <div class="status" id="status">Press Ctrl/Cmd + Shift + O to open, then Ctrl/Cmd + Shift + 1 to capture.</div>
+          <div class="captures">
+            <div class="captures__strip" id="captureStrip" hidden></div>
+            <div class="captures__empty" id="captureEmpty">No screenshots yet.</div>
+          </div>
           <div class="result-card">
             <div class="card-label">Detected text</div>
             <pre class="result" id="result">Waiting for OCR...</pre>
@@ -41,8 +45,8 @@
           <div class="footer">
             <div id="meta">Bridge ready</div>
             <div class="hotkey-group">
-              <div class="hotkey" id="quickHotkey">Quick: Ctrl/Cmd + Shift + O</div>
-              <div class="hotkey" id="regionHotkey">Region: Ctrl/Cmd + Shift + R</div>
+              <div class="hotkey" id="quickHotkey">Open: Ctrl/Cmd + Shift + O</div>
+              <div class="hotkey" id="regionHotkey">Capture: Ctrl/Cmd + Shift + 1</div>
             </div>
           </div>
         </section>

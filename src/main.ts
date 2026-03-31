@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   globalShortcut,
   ipcMain,
+  nativeImage,
   screen,
   type BrowserWindowConstructorOptions,
   type Display,
@@ -12,9 +13,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import screenshot from 'screenshot-desktop';
 
-const HOTKEY_QUICK_CAPTURE = 'CommandOrControl+Shift+O';
-const HOTKEY_REGION_CAPTURE = 'CommandOrControl+Shift+R';
+const HOTKEY_TOGGLE_OVERLAY = 'CommandOrControl+Shift+O';
+const HOTKEY_CAPTURE_SCREENSHOT = 'CommandOrControl+Shift+1';
 const HOTKEY_DEBOUNCE_MS = 250;
+const MAX_CAPTURE_HISTORY = 12;
 const OVERLAY_TARGET_TITLE = (process.env.OVERLAY_FUZZ_TARGET_WINDOW_TITLE || '').trim();
 const ENABLE_OVERLAY_ATTACH = (process.env.OVERLAY_FUZZ_ATTACH_TO_TARGET || '').trim() === '1';
 const VITE_DEV_SERVER_URL = (process.env.VITE_DEV_SERVER_URL || '').trim();
@@ -138,6 +140,7 @@ interface UiohookBackend {
     stop?: () => void;
   };
   keycodes: Record<string, number | undefined>;
+  digitOneKeycode: number;
 }
 
 type OcrWorkerMessage =
@@ -145,6 +148,24 @@ type OcrWorkerMessage =
   | { type: 'progress'; requestId: number; status?: string }
   | { type: 'result'; requestId: number; text?: string; confidence?: number | null }
   | { type: 'error'; requestId: number; error?: string };
+
+interface CapturePreviewPayload {
+  id: string;
+  thumbnailDataUrl: string;
+  capturedAt: number;
+}
+
+interface CaptureCollectionPayload {
+  captures: CapturePreviewPayload[];
+  activeCaptureId: string | null;
+}
+
+interface CaptureResult {
+  id: string;
+  buffer: Buffer;
+  thumbnailDataUrl: string;
+  capturedAt: number;
+}
 
 let overlayWindow: BrowserWindow | null = null;
 let isCapturing = false;
@@ -160,6 +181,8 @@ let consoleWindowBounds: Electron.Rectangle | null = null;
 let captureSettings: CaptureSettings = cloneCaptureSettings(DEFAULT_CAPTURE_SETTINGS);
 let hideOverlayFromScreenshots = true;
 let latestCapture: CaptureResult | null = null;
+let captureHistory: CaptureResult[] = [];
+let captureSequence = 0;
 
 function safeRequire(moduleName: string): { module: any; error: Error | null } {
   try {
@@ -167,6 +190,18 @@ function safeRequire(moduleName: string): { module: any; error: Error | null } {
   } catch (error) {
     return { module: null, error: error instanceof Error ? error : new Error(String(error)) };
   }
+}
+
+function resolveDigitOneKeycode(keycodes: Record<string, number | undefined>): number | null {
+  const candidates = ['NUM_1', 'KEY_1', 'DIGIT1', 'ONE', 'N1', '1'];
+  for (const candidate of candidates) {
+    const value = keycodes[candidate];
+    if (typeof value === 'number') {
+      return value;
+    }
+  }
+
+  return null;
 }
 
 function resolveUiohookBackend(): UiohookBackend | null {
@@ -184,11 +219,12 @@ function resolveUiohookBackend(): UiohookBackend | null {
     return null;
   }
 
-  if (keycodes.O === undefined || keycodes.R === undefined) {
+  const digitOneKeycode = resolveDigitOneKeycode(keycodes);
+  if (keycodes.O === undefined || digitOneKeycode === null) {
     return null;
   }
 
-  return { hook, keycodes };
+  return { hook, keycodes, digitOneKeycode };
 }
 
 function resolveOverlayWindowBackend(): OverlayWindowBackend | null {
@@ -841,8 +877,10 @@ function emitOverlayMode(): void {
     overlayWindow.webContents.send('overlay-mode', {
       mode: overlayMode,
       hotkeys: {
-        quick: HOTKEY_QUICK_CAPTURE,
-        region: HOTKEY_REGION_CAPTURE,
+        quick: HOTKEY_TOGGLE_OVERLAY,
+        capture: HOTKEY_CAPTURE_SCREENSHOT,
+        // Backward compatibility for older renderer bundles.
+        region: HOTKEY_CAPTURE_SCREENSHOT,
       },
     });
   } catch {
@@ -889,6 +927,46 @@ function applyOverlayScreenshotVisibility(): void {
   } catch {
     // setContentProtection can be unsupported on some window managers.
   }
+}
+
+function buildCaptureCollectionPayload(): CaptureCollectionPayload {
+  return {
+    captures: captureHistory.map((capture) => ({
+      id: capture.id,
+      thumbnailDataUrl: capture.thumbnailDataUrl,
+      capturedAt: capture.capturedAt,
+    })),
+    activeCaptureId: latestCapture?.id || null,
+  };
+}
+
+function emitCaptureCollection(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  try {
+    overlayWindow.webContents.send('overlay-captures', buildCaptureCollectionPayload());
+  } catch {
+    // Ignore renderer delivery errors during startup/shutdown races.
+  }
+}
+
+function createCaptureThumbnailDataUrl(buffer: Buffer): string {
+  try {
+    const image = nativeImage.createFromBuffer(buffer);
+    const resized = image.resize({ width: 172, quality: 'good' });
+    return resized.toDataURL();
+  } catch {
+    return `data:image/png;base64,${buffer.toString('base64')}`;
+  }
+}
+
+function addCaptureToHistory(capture: CaptureResult): void {
+  const nextHistory = [...captureHistory, capture];
+  captureHistory = nextHistory.slice(-MAX_CAPTURE_HISTORY);
+  latestCapture = capture;
+  emitCaptureCollection();
 }
 
 function settleOcrRequest(requestId: number, error: Error | null, payload?: OcrResultPayload): void {
@@ -1016,10 +1094,6 @@ async function disposeOcrWorkerThread(): Promise<void> {
   }
 }
 
-interface CaptureResult {
-  buffer: Buffer;
-}
-
 async function captureAroundCursor(): Promise<CaptureResult> {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
@@ -1031,11 +1105,36 @@ async function captureAroundCursor(): Promise<CaptureResult> {
     buffer = (await screenshot({ format: 'png' })) as Buffer;
   }
 
-  return { buffer };
+  const capturedAt = Date.now();
+  captureSequence += 1;
+
+  return {
+    id: `capture-${capturedAt}-${captureSequence}`,
+    buffer,
+    thumbnailDataUrl: createCaptureThumbnailDataUrl(buffer),
+    capturedAt,
+  };
 }
 
 function getLlmImageBuffer(capture: CaptureResult): Buffer {
   return capture.buffer;
+}
+
+function isMissingOcrRuntimeError(errorMessage: string): boolean {
+  const normalized = errorMessage.toLowerCase();
+  return normalized.includes('missing eng.traineddata') || normalized.includes('missing tesseract core js module');
+}
+
+function disableOcrSettingForMissingRuntime(): void {
+  if (!captureSettings.useOcr) {
+    return;
+  }
+
+  captureSettings = {
+    ...captureSettings,
+    useOcr: false,
+  };
+  persistCaptureSettings(captureSettings);
 }
 
 async function runCapturePipeline(capture: CaptureResult, query: string): Promise<boolean> {
@@ -1058,10 +1157,27 @@ async function runCapturePipeline(capture: CaptureResult, query: string): Promis
     let ocrConfidence: number | null = null;
 
     if (activeSettings.useOcr) {
-      overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
-      const bestResult = await runWorkerOcr(capture);
-      extractedText = bestResult.text || '';
-      ocrConfidence = bestResult.confidence ?? null;
+      try {
+        overlayWindow.webContents.send('ocr-status', 'Preparing OCR worker...');
+        const bestResult = await runWorkerOcr(capture);
+        extractedText = bestResult.text || '';
+        ocrConfidence = bestResult.confidence ?? null;
+      } catch (ocrError) {
+        const ocrErrorMessage = ocrError instanceof Error ? ocrError.message : String(ocrError);
+        if (isMissingOcrRuntimeError(ocrErrorMessage)) {
+          disableOcrSettingForMissingRuntime();
+          void disposeOcrWorkerThread();
+        }
+
+        const imageProvider = providerLabel(activeSettings.imageLlm.provider);
+        overlayWindow.webContents.send(
+          'ocr-status',
+          `OCR unavailable (${ocrErrorMessage}). Falling back to image extraction via ${imageProvider}...`,
+        );
+        const imageBuffer = getLlmImageBuffer(capture);
+        extractedText = await runLlmImageExtraction(imageBuffer, activeSettings.imageLlm);
+        ocrConfidence = null;
+      }
     } else {
       const imageProvider = providerLabel(activeSettings.imageLlm.provider);
       overlayWindow.webContents.send('ocr-status', `Extracting text from screenshot via ${imageProvider}...`);
@@ -1119,7 +1235,8 @@ async function captureForQuery(captureFn: () => Promise<CaptureResult>, captureM
   overlayWindow.webContents.send('ocr-status', captureMessage);
 
   try {
-    latestCapture = await captureFn();
+    const capture = await captureFn();
+    addCaptureToHistory(capture);
     overlayWindow.webContents.send('ocr-status', 'Screenshot captured. Type a query and press Enter to send.');
     return true;
   } catch (error) {
@@ -1149,11 +1266,10 @@ function hideOverlay(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   clearSelectionContext();
   setOverlayInteractivity(false);
-  latestCapture = null;
   overlayWindow.hide();
 }
 
-function showOverlayForCapture(): void {
+function showOverlayConsole(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   if (!overlayBridgeInitialized) {
@@ -1165,23 +1281,21 @@ function showOverlayForCapture(): void {
   setOverlayMode(OVERLAY_MODES.CONSOLE);
   setOverlayInteractivity(true);
   overlayWindow.show();
+  emitCaptureCollection();
 }
 
-function toggleOverlayAndCapture(): void {
+function openOverlayFromHotkey(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  showOverlayConsole();
+}
 
-  if (overlayWindow.isVisible()) {
-    hideOverlay();
-    return;
+function captureFromHotkey(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  if (!overlayWindow.isVisible()) {
+    showOverlayConsole();
   }
 
-  showOverlayForCapture();
-  latestCapture = null;
   void captureForQuery(captureAroundCursor, 'Capturing screen...');
-}
-
-function startRegionSelection(): void {
-  toggleOverlayAndCapture();
 }
 
 function registerOverlayIpc(): void {
@@ -1205,6 +1319,10 @@ function registerOverlayIpc(): void {
 
   ipcMain.handle('overlay:get-settings', () => {
     return cloneCaptureSettings(captureSettings);
+  });
+
+  ipcMain.handle('overlay:get-captures', () => {
+    return buildCaptureCollectionPayload();
   });
 
   ipcMain.handle('overlay:update-settings', (_event, nextSettings: unknown) => {
@@ -1257,24 +1375,24 @@ function registerOverlayIpc(): void {
 }
 
 function createHotkeyManager({
-  onQuickCapture,
-  onRegionSelection,
+  onToggleOverlay,
+  onCaptureScreenshot,
 }: {
-  onQuickCapture: () => void;
-  onRegionSelection: () => void;
+  onToggleOverlay: () => void;
+  onCaptureScreenshot: () => void;
 }) {
   const uiohookBackend = resolveUiohookBackend();
   let activeBackend: 'uiohook' | 'globalShortcut' | null = null;
   const lastTriggeredAt = {
-    quick: 0,
-    region: 0,
+    open: 0,
+    capture: 0,
   };
   let keydownListener: ((event: UiohookEvent) => void) | null = null;
 
   function unregisterGlobalShortcut(): void {
     try {
-      globalShortcut.unregister(HOTKEY_QUICK_CAPTURE);
-      globalShortcut.unregister(HOTKEY_REGION_CAPTURE);
+      globalShortcut.unregister(HOTKEY_TOGGLE_OVERLAY);
+      globalShortcut.unregister(HOTKEY_CAPTURE_SCREENSHOT);
     } catch {
       // Ignore cleanup errors.
     }
@@ -1301,7 +1419,7 @@ function createHotkeyManager({
     }
   }
 
-  function resolveHotkeyAction(event: UiohookEvent | null | undefined): 'quick' | 'region' | null {
+  function resolveHotkeyAction(event: UiohookEvent | null | undefined): 'open' | 'capture' | null {
     if (!event) return null;
 
     const needsMeta = process.platform === 'darwin';
@@ -1314,17 +1432,17 @@ function createHotkeyManager({
     if (!keycodes) return null;
 
     if (event.keycode === keycodes.O) {
-      return 'quick';
+      return 'open';
     }
 
-    if (event.keycode === keycodes.R) {
-      return 'region';
+    if (event.keycode === uiohookBackend?.digitOneKeycode) {
+      return 'capture';
     }
 
     return null;
   }
 
-  function triggerAction(action: 'quick' | 'region'): void {
+  function triggerAction(action: 'open' | 'capture'): void {
     const now = Date.now();
     if (now - lastTriggeredAt[action] < HOTKEY_DEBOUNCE_MS) {
       return;
@@ -1332,13 +1450,13 @@ function createHotkeyManager({
 
     lastTriggeredAt[action] = now;
 
-    if (action === 'quick') {
-      onQuickCapture();
+    if (action === 'open') {
+      onToggleOverlay();
       return;
     }
 
-    if (action === 'region') {
-      onRegionSelection();
+    if (action === 'capture') {
+      onCaptureScreenshot();
     }
   }
 
@@ -1365,16 +1483,16 @@ function createHotkeyManager({
       }
 
       try {
-        const quickRegistered = globalShortcut.register(HOTKEY_QUICK_CAPTURE, onQuickCapture);
-        const regionRegistered = globalShortcut.register(HOTKEY_REGION_CAPTURE, onRegionSelection);
+        const openRegistered = globalShortcut.register(HOTKEY_TOGGLE_OVERLAY, onToggleOverlay);
+        const captureRegistered = globalShortcut.register(HOTKEY_CAPTURE_SCREENSHOT, onCaptureScreenshot);
 
-        if (quickRegistered || regionRegistered) {
+        if (openRegistered || captureRegistered) {
           activeBackend = 'globalShortcut';
         } else {
           console.warn(
             '[overlayFuzz] globalShortcut registration failed for hotkeys:',
-            HOTKEY_QUICK_CAPTURE,
-            HOTKEY_REGION_CAPTURE,
+            HOTKEY_TOGGLE_OVERLAY,
+            HOTKEY_CAPTURE_SCREENSHOT,
           );
         }
       } catch (error) {
@@ -1439,6 +1557,7 @@ function createOverlayWindow(): void {
 
   overlayWindow.webContents.on('did-finish-load', () => {
     emitOverlayMode();
+    emitCaptureCollection();
   });
 
   overlayWindow.on('close', (event) => {
@@ -1545,8 +1664,8 @@ app.whenReady().then(() => {
   createOverlayWindow();
   displaySyncCleanup = installDisplaySync();
   hotkeyManager = createHotkeyManager({
-    onQuickCapture: toggleOverlayAndCapture,
-    onRegionSelection: startRegionSelection,
+    onToggleOverlay: openOverlayFromHotkey,
+    onCaptureScreenshot: captureFromHotkey,
   });
   hotkeyManager.start();
 });
@@ -1567,6 +1686,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   ipcMain.removeHandler('overlay:hide-console');
   ipcMain.removeHandler('overlay:get-settings');
+  ipcMain.removeHandler('overlay:get-captures');
   ipcMain.removeHandler('overlay:update-settings');
   ipcMain.removeHandler('overlay:set-screenshot-exclusion');
   ipcMain.removeHandler('overlay:get-screenshot-exclusion');
