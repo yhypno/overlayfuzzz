@@ -54,6 +54,7 @@ Electron-based overlay + OCR hotkey capture, inspired by Exiled-Exchange-2's app
 ## Notes
 - `uiohook-napi` and `electron-overlay-window` are optional dependencies, so installs can still succeed if native builds are unavailable.
 - LLM provider settings (provider, model, base URL, API key, OCR toggle, prompt) are configured from the in-window Settings screen and stored under Electron's user data folder (`overlayfuzz-settings.json`).
+- API + IPC debug activity is logged to `logs/overlayfuzz-api-debug.log` under the Electron user data directory (sensitive values like API keys are redacted).
 - Overlay attachment by target window is opt-in. To enable it, set both:
   - `OVERLAY_FUZZ_ATTACH_TO_TARGET=1`
   - `OVERLAY_FUZZ_TARGET_WINDOW_TITLE="<target window title>"`

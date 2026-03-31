@@ -6,6 +6,8 @@ import {
   screen,
   type BrowserWindowConstructorOptions,
   type Display,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
 } from 'electron';
 import { Worker } from 'node:worker_threads';
 import fs from 'node:fs';
@@ -30,6 +32,17 @@ const CONSOLE_WINDOW_MARGIN = 28;
 const OCR_WORKER_ENTRY = path.join(__dirname, 'ocr-worker.js');
 const CAPTURE_SETTINGS_FILE = 'overlayfuzz-settings.json';
 const LLM_PROVIDERS = ['openrouter', 'ollama', 'openai', 'anthropic', 'gemini'] as const;
+const API_DEBUG_LOG_DIR = 'logs';
+const API_DEBUG_LOG_FILE = 'overlayfuzz-api-debug.log';
+const LOG_VALUE_PREVIEW_LIMIT = 180;
+const LOG_ARRAY_PREVIEW_LIMIT = 6;
+const LOG_OBJECT_DEPTH_LIMIT = 4;
+const SENSITIVE_LOG_KEY_PATTERN = /(api[-_]?key|authorization|token|password|secret|image|images|inline_data|data)/i;
+const SENSITIVE_URL_PARAM_PATTERN = /(api[-_]?key|token|access[-_]?token|key|auth)/i;
+
+let apiHttpRequestSeq = 0;
+let apiIpcRequestSeq = 0;
+let hasWarnedApiLogWriteFailure = false;
 
 type LlmProvider = (typeof LLM_PROVIDERS)[number];
 
@@ -274,6 +287,266 @@ function normalizeString(value: unknown, fallback = ''): string {
   return value.trim();
 }
 
+function resolveApiDebugLogPath(): string {
+  try {
+    if (app.isReady()) {
+      return path.join(app.getPath('userData'), API_DEBUG_LOG_DIR, API_DEBUG_LOG_FILE);
+    }
+  } catch {
+    // Fall back to project root when userData is not available.
+  }
+
+  return path.join(PROJECT_ROOT, API_DEBUG_LOG_DIR, API_DEBUG_LOG_FILE);
+}
+
+function sanitizeUrlForLog(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    for (const key of parsed.searchParams.keys()) {
+      if (SENSITIVE_URL_PARAM_PATTERN.test(key)) {
+        parsed.searchParams.set(key, '[redacted]');
+      }
+    }
+
+    return parsed.toString();
+  } catch {
+    return rawUrl.replace(
+      /([?&](?:api[-_]?key|access[-_]?token|token|key|auth)=)[^&]*/gi,
+      '$1[redacted]',
+    );
+  }
+}
+
+function toLogSafeValue(input: unknown): unknown {
+  const seen = new WeakSet<object>();
+
+  const visit = (value: unknown, keyName: string, depth: number): unknown => {
+    if (value === null || typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      if (SENSITIVE_LOG_KEY_PATTERN.test(keyName)) {
+        return `[redacted:${value.length} chars]`;
+      }
+
+      if (value.length > LOG_VALUE_PREVIEW_LIMIT) {
+        return `${value.slice(0, LOG_VALUE_PREVIEW_LIMIT)}...(+${value.length - LOG_VALUE_PREVIEW_LIMIT} chars)`;
+      }
+
+      return value;
+    }
+
+    if (typeof value === 'undefined') {
+      return '[undefined]';
+    }
+
+    if (typeof value === 'function') {
+      return '[function]';
+    }
+
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+
+    if (Array.isArray(value)) {
+      if (SENSITIVE_LOG_KEY_PATTERN.test(keyName)) {
+        return `[redacted:${value.length} items]`;
+      }
+
+      if (depth >= LOG_OBJECT_DEPTH_LIMIT) {
+        return `[array:${value.length}]`;
+      }
+
+      const preview = value.slice(0, LOG_ARRAY_PREVIEW_LIMIT).map((entry) => visit(entry, '', depth + 1));
+      if (value.length > LOG_ARRAY_PREVIEW_LIMIT) {
+        preview.push(`[+${value.length - LOG_ARRAY_PREVIEW_LIMIT} more items]`);
+      }
+
+      return preview;
+    }
+
+    if (typeof value === 'object') {
+      if (SENSITIVE_LOG_KEY_PATTERN.test(keyName)) {
+        return '[redacted]';
+      }
+
+      if (depth >= LOG_OBJECT_DEPTH_LIMIT) {
+        return '[object]';
+      }
+
+      if (seen.has(value as object)) {
+        return '[circular]';
+      }
+      seen.add(value as object);
+
+      const sanitized: Record<string, unknown> = {};
+      for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+        sanitized[entryKey] = visit(entryValue, entryKey, depth + 1);
+      }
+
+      return sanitized;
+    }
+
+    return String(value);
+  };
+
+  return visit(input, '', 0);
+}
+
+function summarizeRecordKeys(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      type: Array.isArray(value) ? 'array' : typeof value,
+      size: Array.isArray(value) ? value.length : undefined,
+    };
+  }
+
+  return {
+    type: 'object',
+    keys: Object.keys(value as Record<string, unknown>).slice(0, 20),
+  };
+}
+
+function summarizeRequestBodyForLog(body: Record<string, unknown>): Record<string, unknown> {
+  const summary: Record<string, unknown> = {
+    keys: Object.keys(body).slice(0, 20),
+  };
+
+  if (typeof body.model === 'string') {
+    summary.model = body.model;
+  }
+
+  if (typeof body.max_tokens === 'number') {
+    summary.maxTokens = body.max_tokens;
+  }
+
+  if (typeof body.stream === 'boolean') {
+    summary.stream = body.stream;
+  }
+
+  if (Array.isArray(body.messages)) {
+    summary.messageCount = body.messages.length;
+  }
+
+  if (Array.isArray(body.contents)) {
+    summary.contentsCount = body.contents.length;
+  }
+
+  return summary;
+}
+
+function summarizeIpcPayloadForLog(payload: unknown): unknown {
+  if (typeof payload === 'string') {
+    return { type: 'string', length: payload.length };
+  }
+
+  if (typeof payload === 'number' || typeof payload === 'boolean' || payload === null) {
+    return payload;
+  }
+
+  if (Array.isArray(payload)) {
+    return {
+      type: 'array',
+      length: payload.length,
+    };
+  }
+
+  return summarizeRecordKeys(payload);
+}
+
+function summarizeIpcArgsForLog(args: unknown[]): unknown[] {
+  return args.map((arg) => summarizeIpcPayloadForLog(arg));
+}
+
+function writeApiDebugLog(event: string, details: Record<string, unknown> = {}): void {
+  const payload = {
+    timestamp: new Date().toISOString(),
+    event,
+    details: toLogSafeValue(details),
+  };
+  const line = JSON.stringify(payload);
+
+  console.debug('[overlayFuzz][api]', line);
+
+  try {
+    const filePath = resolveApiDebugLogPath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.appendFileSync(filePath, `${line}\n`, 'utf8');
+  } catch (error) {
+    if (!hasWarnedApiLogWriteFailure) {
+      hasWarnedApiLogWriteFailure = true;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[overlayFuzz] Failed to write API debug logs:', message);
+    }
+  }
+}
+
+function registerLoggedIpcHandle(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown | Promise<unknown>,
+): void {
+  ipcMain.handle(channel, async (event, ...args) => {
+    const requestId = ++apiIpcRequestSeq;
+    const startedAt = Date.now();
+    writeApiDebugLog('ipc.invoke.start', {
+      requestId,
+      channel,
+      args: summarizeIpcArgsForLog(args),
+    });
+
+    try {
+      const result = await handler(event, ...args);
+      writeApiDebugLog('ipc.invoke.success', {
+        requestId,
+        channel,
+        durationMs: Date.now() - startedAt,
+        result: summarizeIpcPayloadForLog(result),
+      });
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeApiDebugLog('ipc.invoke.error', {
+        requestId,
+        channel,
+        durationMs: Date.now() - startedAt,
+        error: message,
+      });
+      throw error;
+    }
+  });
+}
+
+function registerLoggedIpcEvent(channel: string, listener: (event: IpcMainEvent, ...args: unknown[]) => void): void {
+  ipcMain.on(channel, (event, ...args) => {
+    const requestId = ++apiIpcRequestSeq;
+    const startedAt = Date.now();
+    writeApiDebugLog('ipc.event.start', {
+      requestId,
+      channel,
+      args: summarizeIpcArgsForLog(args),
+    });
+
+    try {
+      listener(event, ...args);
+      writeApiDebugLog('ipc.event.success', {
+        requestId,
+        channel,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeApiDebugLog('ipc.event.error', {
+        requestId,
+        channel,
+        durationMs: Date.now() - startedAt,
+        error: message,
+      });
+      throw error;
+    }
+  });
+}
+
 function cloneCaptureSettings(settings: CaptureSettings): CaptureSettings {
   return {
     useOcr: Boolean(settings.useOcr),
@@ -452,15 +725,49 @@ function extractHttpError(body: unknown, status: number): string {
   return `HTTP ${status}`;
 }
 
-async function postJson(url: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Promise<any> {
-  const response = await fetch(url, {
+async function postJson(
+  url: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+  metadata: Record<string, unknown> = {},
+): Promise<any> {
+  const requestId = ++apiHttpRequestSeq;
+  const startedAt = Date.now();
+  const safeUrl = sanitizeUrlForLog(url);
+  const requestHeaders = {
+    'content-type': 'application/json',
+    ...headers,
+  };
+  const serializedBody = JSON.stringify(body);
+
+  writeApiDebugLog('http.request.start', {
+    requestId,
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...headers,
-    },
-    body: JSON.stringify(body),
+    url: safeUrl,
+    headers: requestHeaders,
+    body: summarizeRequestBodyForLog(body),
+    metadata,
   });
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: serializedBody,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeApiDebugLog('http.request.network-error', {
+      requestId,
+      method: 'POST',
+      url: safeUrl,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      metadata,
+    });
+    throw error;
+  }
 
   const raw = await response.text();
   let parsed: any = null;
@@ -474,8 +781,32 @@ async function postJson(url: string, body: Record<string, unknown>, headers: Rec
   }
 
   if (!response.ok) {
-    throw new Error(extractHttpError(parsed, response.status));
+    const errorMessage = extractHttpError(parsed, response.status);
+    writeApiDebugLog('http.request.error', {
+      requestId,
+      method: 'POST',
+      url: safeUrl,
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Date.now() - startedAt,
+      response: summarizeRecordKeys(parsed),
+      error: errorMessage,
+      metadata,
+    });
+    throw new Error(errorMessage);
   }
+
+  writeApiDebugLog('http.request.success', {
+    requestId,
+    method: 'POST',
+    url: safeUrl,
+    status: response.status,
+    statusText: response.statusText,
+    durationMs: Date.now() - startedAt,
+    requestBytes: Buffer.byteLength(serializedBody, 'utf8'),
+    responseBytes: Buffer.byteLength(raw, 'utf8'),
+    metadata,
+  });
 
   return parsed;
 }
@@ -575,6 +906,12 @@ async function requestOpenAiCompatible(
       Authorization: `Bearer ${config.apiKey}`,
       ...extraHeaders,
     },
+    {
+      provider,
+      model: config.model,
+      apiType: 'openai-compatible',
+      hasImage: Boolean(imageBase64),
+    },
   );
 
   const firstChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
@@ -597,17 +934,27 @@ async function requestOllama(config: LlmProviderConfig, prompt: string, imageBas
   }
 
   const endpoint = `${stripTrailingSlash(config.baseUrl)}/api/chat`;
-  const payload = await postJson(endpoint, {
-    model: config.model,
-    stream: false,
-    messages: [
-      {
-        role: 'user',
-        content: prompt,
-        ...(imageBase64 ? { images: [imageBase64] } : {}),
-      },
-    ],
-  });
+  const payload = await postJson(
+    endpoint,
+    {
+      model: config.model,
+      stream: false,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+          ...(imageBase64 ? { images: [imageBase64] } : {}),
+        },
+      ],
+    },
+    {},
+    {
+      provider: 'ollama',
+      model: config.model,
+      apiType: 'ollama-chat',
+      hasImage: Boolean(imageBase64),
+    },
+  );
 
   const text = extractTextFromContentBlock(payload?.message?.content);
   if (!text) {
@@ -661,6 +1008,12 @@ async function requestAnthropic(
       'x-api-key': config.apiKey,
       'anthropic-version': '2023-06-01',
     },
+    {
+      provider: 'anthropic',
+      model: config.model,
+      apiType: 'anthropic-messages',
+      hasImage: Boolean(imageBase64),
+    },
   );
 
   const text = extractTextFromContentBlock(payload?.content);
@@ -685,25 +1038,35 @@ async function requestGemini(
   }
 
   const endpoint = `${stripTrailingSlash(config.baseUrl)}/v1beta/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
-  const payload = await postJson(endpoint, {
-    contents: [
-      {
-        parts: [
-          { text: prompt },
-          ...(imageBase64
-            ? [
-                {
-                  inline_data: {
-                    mime_type: 'image/png',
-                    data: imageBase64,
+  const payload = await postJson(
+    endpoint,
+    {
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            ...(imageBase64
+              ? [
+                  {
+                    inline_data: {
+                      mime_type: 'image/png',
+                      data: imageBase64,
+                    },
                   },
-                },
-              ]
-            : []),
-        ],
-      },
-    ],
-  });
+                ]
+              : []),
+          ],
+        },
+      ],
+    },
+    {},
+    {
+      provider: 'gemini',
+      model: config.model,
+      apiType: 'gemini-generateContent',
+      hasImage: Boolean(imageBase64),
+    },
+  );
 
   const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
   const firstCandidate = candidates[0];
@@ -1185,7 +1548,7 @@ function startRegionSelection(): void {
 }
 
 function registerOverlayIpc(): void {
-  ipcMain.handle('overlay:hide-console', () => {
+  registerLoggedIpcHandle('overlay:hide-console', () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return false;
     }
@@ -1195,7 +1558,7 @@ function registerOverlayIpc(): void {
   });
 
   // Backward compatibility for older renderer bundles that still use send().
-  ipcMain.on('overlay:hide-console', () => {
+  registerLoggedIpcEvent('overlay:hide-console', () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return;
     }
@@ -1203,11 +1566,11 @@ function registerOverlayIpc(): void {
     hideOverlay();
   });
 
-  ipcMain.handle('overlay:get-settings', () => {
+  registerLoggedIpcHandle('overlay:get-settings', () => {
     return cloneCaptureSettings(captureSettings);
   });
 
-  ipcMain.handle('overlay:update-settings', (_event, nextSettings: unknown) => {
+  registerLoggedIpcHandle('overlay:update-settings', (_event, nextSettings: unknown) => {
     const previous = captureSettings;
     captureSettings = sanitizeCaptureSettings(nextSettings, captureSettings);
     persistCaptureSettings(captureSettings);
@@ -1226,17 +1589,17 @@ function registerOverlayIpc(): void {
     return cloneCaptureSettings(captureSettings);
   });
 
-  ipcMain.handle('overlay:set-screenshot-exclusion', (_event, enabled: unknown) => {
+  registerLoggedIpcHandle('overlay:set-screenshot-exclusion', (_event, enabled: unknown) => {
     hideOverlayFromScreenshots = Boolean(enabled);
     applyOverlayScreenshotVisibility();
     return hideOverlayFromScreenshots;
   });
 
-  ipcMain.handle('overlay:get-screenshot-exclusion', () => {
+  registerLoggedIpcHandle('overlay:get-screenshot-exclusion', () => {
     return hideOverlayFromScreenshots;
   });
 
-  ipcMain.handle('overlay:submit-query', async (_event, query: unknown) => {
+  registerLoggedIpcHandle('overlay:submit-query', async (_event, query: unknown) => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return false;
     }
@@ -1534,6 +1897,9 @@ function installDisplaySync(): () => void {
 }
 
 app.whenReady().then(() => {
+  writeApiDebugLog('logger.ready', {
+    logFile: resolveApiDebugLogPath(),
+  });
   captureSettings = loadCaptureSettingsFromDisk();
   if (captureSettings.useOcr) {
     ensureOcrWorkerThread().catch((error) => {
